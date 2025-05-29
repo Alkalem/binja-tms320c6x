@@ -6,7 +6,7 @@ from capstone import CS_ARCH_TMS320C64X, CS_MODE_LITTLE_ENDIAN
 import capstone
 
 from dataclasses import dataclass
-from typing import Optional, List
+from typing import Optional, List, Any
 from enum import IntEnum
 
 from .constants import ARCH_SIZE, LOAD_BASE, REGISTER_NAMES
@@ -19,6 +19,9 @@ class Operand:
 
     def gen_tokens(self) -> List[InstructionTextToken]:
         raise NotImplementedError("abstract method")
+    
+    def get_value(self) -> Any:
+        return None
 
 class IntegerOperand(Operand):
     def __init__(self, value:int):
@@ -48,6 +51,9 @@ class IntegerOperand(Operand):
                     InstructionTextTokenType.IntegerToken,
                     integer
                 )]
+        
+    def get_value(self) -> Any:
+        return self.value
     
 class RegisterOperand(Operand):
     def __init__(self, name:str):
@@ -65,6 +71,9 @@ class RegisterOperand(Operand):
                 InstructionTextTokenType.RegisterToken,
                 self.reg_name
             )]
+    
+    def get_value(self) -> Any:
+        return self.reg_name
 
 class MemoryOperand(Operand):
     class Mode(IntEnum):
@@ -214,7 +223,7 @@ class Disassembler:
                 raise NotImplementedError(op)
 
         return Instruction(
-                condition, mnemonic, unit,
+                condition, mnemonic.upper(), unit,
                 ops, parallel, instr.size
             )
     
@@ -223,7 +232,7 @@ class Disassembler:
         result = InstructionInfo()
         result.length = instr.size
         
-        if instr.mnemonic == "b":
+        if instr.mnemonic == "B":
             # Work around: calculate instruction delay by look-ahead
             # (see binaryninja-api issue 6868)
             branch_delay = 5
@@ -240,8 +249,8 @@ class Disassembler:
                 # log_warn(f"{delay_instr.mnemonic}, {instruction_delay}")
                 if delay_instr.parallel: 
                     continue
-                elif delay_instr.mnemonic == "nop":
-                    branch_delay -= delay_instr.ops[0].value
+                elif delay_instr.mnemonic == "NOP":
+                    branch_delay -= delay_instr.ops[0].get_value()
                 else:
                     branch_delay -= 1
             
