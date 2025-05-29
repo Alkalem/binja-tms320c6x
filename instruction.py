@@ -19,9 +19,6 @@ class Operand:
 
     def gen_tokens(self) -> List[InstructionTextToken]:
         raise NotImplementedError("abstract method")
-    
-    def gen_il(self, il):
-        raise NotImplementedError("abstract method")
 
 class IntegerOperand(Operand):
     def __init__(self, value:int):
@@ -51,9 +48,6 @@ class IntegerOperand(Operand):
                     InstructionTextTokenType.IntegerToken,
                     integer
                 )]
-        
-    def gen_il(self, il):
-        return il.const(ARCH_SIZE, self.value)
     
 class RegisterOperand(Operand):
     def __init__(self, name:str):
@@ -71,9 +65,6 @@ class RegisterOperand(Operand):
                 InstructionTextTokenType.RegisterToken,
                 self.reg_name
             )]
-    
-    def gen_il(self, il):
-        return il.reg(ARCH_SIZE, self.reg_name)
 
 class MemoryOperand(Operand):
     class Mode(IntEnum):

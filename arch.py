@@ -3,6 +3,7 @@ from binaryninja.function import RegisterInfo
 
 from .instruction import Disassembler, gen_tokens, RegisterOperand
 from .constants import *
+from .lifting import lift_il
 
 
 class TMS320C67x(Architecture):
@@ -41,28 +42,4 @@ class TMS320C67x(Architecture):
     
     def get_instruction_low_level_il(self, data, addr, il):
         instruction = self.disasm.decode(data, addr)
-        if instruction.mnemonic == "invalid":
-            return None
-        
-        if instruction.mnemonic == "nop":
-            il.append(il.nop())
-            return instruction.size
-        else:
-            if instruction.mnemonic == "mvk":
-                expr = il.set_reg(
-                    ARCH_SIZE, 
-                    instruction.ops[1].reg_name,
-                    instruction.ops[0].gen_il(il)
-                )
-            elif (instruction.mnemonic == "b" 
-                and isinstance(instruction.ops[0], RegisterOperand)):
-                if instruction.ops[0].reg_name == "A0":
-                    expr = il.jump(instruction.ops[0].gen_il(il))
-                if instruction.ops[0].reg_name == "B3":
-                    expr = il.ret(instruction.ops[0].gen_il(il))
-            else:
-                expr = il.unimplemented()
-        
-        il.append(expr)
-
-        return instruction.size
+        return lift_il(instruction, il)
