@@ -41,5 +41,4 @@ class TMS320C67x(Architecture):
         return tokens, instruction.size
     
     def get_instruction_low_level_il(self, data, addr, il):
-        instruction = self.disasm.decode(data, addr)
-        return lift_il(instruction, il)
+        return lift_il(self.disasm, data, addr, il)
