@@ -110,7 +110,7 @@ def lift_delayed(instr:Instruction, disasm:Disassembler, data, addr, il:LowLevel
         delay_slots += 1
     while delay_slots > 0 and len(data) > offset:
         current_instr = disasm.decode(data[offset:], addr+offset)
-        if instr.mnemonic == 'invalid':
+        if instr == Instruction.invalid():
             log_warn('Lifting of delayed instruction interrupted by invalid instruction')
             return None # could not disassemble, abort lifting
         offset += current_instr.size
@@ -127,7 +127,7 @@ def lift_delayed(instr:Instruction, disasm:Disassembler, data, addr, il:LowLevel
 
 def lift_il(disasm:Disassembler, data, addr, il: LowLevelILFunction):
     instr = disasm.decode(data, addr)
-    if instr.mnemonic == 'invalid':
+    if instr == Instruction.invalid():
         return None # could not disassemble, do not lift
     
     if instr.mnemonic in INSTRUCTION_DELAY:

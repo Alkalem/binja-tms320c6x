@@ -177,7 +177,7 @@ class Instruction:
     size: int
 
     @classmethod
-    def default(cls):
+    def invalid(cls):
         return Instruction(
             None, "invalid", None, [], False, ARCH_SIZE
         )
@@ -196,7 +196,7 @@ class Disassembler:
             instr = next(self.__dis.disasm(
                     data[3::-1], addr, count=1))
         except StopIteration:
-            return Instruction.default()
+            return Instruction.invalid()
 
         condition = None
         mnemonic = instr.mnemonic
