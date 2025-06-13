@@ -2,14 +2,13 @@ from binaryninja.function import InstructionTextToken, InstructionInfo
 from binaryninja.enums import InstructionTextTokenType, BranchType
 from binaryninja import log_warn
 
-from capstone import CS_ARCH_TMS320C64X, CS_MODE_LITTLE_ENDIAN
-import capstone
-
 from dataclasses import dataclass
 from typing import Optional, List, Any
 from enum import IntEnum
 
 from .constants import ARCH_SIZE, LOAD_BASE, REGISTER_NAMES
+from .disassembler import Disassembler as C6xDisassembler
+from .disassembler.types import OperandType
 
 
 class Operand:
@@ -169,7 +168,7 @@ class MemoryOperand(Operand):
 
 @dataclass
 class Instruction:
-    condition: Optional[str]
+    condition: str
     mnemonic: str
     unit: Optional[str]
     ops: List[Operand]
@@ -184,47 +183,34 @@ class Instruction:
 
 class Disassembler:
     def __init__(self):
-        self.__dis = capstone.Cs(
-                CS_ARCH_TMS320C64X,
-                CS_MODE_LITTLE_ENDIAN
-            )
-        self.__dis.detail = True
+        self.__dis = C6xDisassembler()
     
 
-    def decode(self, data, addr):
+    def decode(self, data, addr) -> Instruction:
         try:
             instr = next(self.__dis.disasm(
-                    data[3::-1], addr, count=1))
+                    data, addr, count=1))
         except StopIteration:
             return Instruction.invalid()
 
-        condition = None
-        mnemonic = instr.mnemonic
-        unit = None
-        if "] " in instr.mnemonic:
-            condition, mnemonic = instr.mnemonic.split("] ")
-            condition = condition[1:]
-        if "." in mnemonic:
-            mnemonic, unit = mnemonic.split(".")
-        parallel = instr.op_str.endswith("||")
-
-        op_strings = instr.op_str.rstrip("|\t").split(", ")
         ops = list()
-        for op in op_strings:
-            if op.startswith("*"):
-                ops.append(MemoryOperand.from_str(op))
-            elif "0x" in op or op.startswith("-"):
-                ops.append(IntegerOperand.from_str(op))
-            elif "a" in op or "b" in op:
-                ops.append(RegisterOperand.from_str(op))
-            elif op.strip().isdecimal():
-                ops.append(IntegerOperand.from_str(op))
-            else:
-                raise NotImplementedError(op)
+        for operand in instr.operands:
+            match operand.type:
+                case OperandType.CONST:
+                    ops.append(IntegerOperand(operand.value))
+                case OperandType.REGISTER:
+                    ops.append(RegisterOperand(str(operand.value)))
+                case OperandType.ADDRESS:
+                    ops.append(MemoryOperand(
+                        RegisterOperand(str(operand.value[1])),
+                        IntegerOperand(operand.value[2] // 4),
+                        MemoryOperand.Mode(operand.value[0].value)))
+                case _:
+                    raise NotImplementedError('operand type not supported')
 
         return Instruction(
-                condition, mnemonic.upper(), unit,
-                ops, parallel, instr.size
+                str(instr.condition), instr.opcode.upper(), instr.unit,
+                ops, instr.parallel, ARCH_SIZE
             )
     
     def info(self, data, addr):
@@ -281,18 +267,17 @@ def gen_tokens(instr: Instruction):
         tokens.extend([
             InstructionTextToken(
                 InstructionTextTokenType.TextToken, 
-                "[" + instr.condition[0]),
+                instr.condition.rstrip("AB012]")),
             *RegisterOperand
-                    .from_str(instr.condition[1:])
+                    .from_str(instr.condition.strip("[!]"))
                     .gen_tokens(),
             InstructionTextToken(
-                InstructionTextTokenType.TextToken, "] "),
+                InstructionTextTokenType.TextToken, "]"),
         ])
-    else:
-        tokens.append(
-            InstructionTextToken(
-                InstructionTextTokenType.TextToken, " " * 6),   
-        )
+    tokens.append(
+        InstructionTextToken(
+            InstructionTextTokenType.TextToken, " " * (6-len(instr.condition))),   
+    )
 
     tokens.append(
         InstructionTextToken(
@@ -304,13 +289,13 @@ def gen_tokens(instr: Instruction):
         tokens.append(
             InstructionTextToken(
                 InstructionTextTokenType.TextToken, 
-                "." + instr.unit)
+                instr.unit)
         )
         middle_length += 1 + len(instr.unit)
     tokens.append(
         InstructionTextToken(
             InstructionTextTokenType.TextToken, 
-            " " * (10 - middle_length)),
+            " " * (12 - middle_length)),
     )
 
     if len(instr.ops) > 0:
