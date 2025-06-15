@@ -117,27 +117,27 @@ def lift_delayed(instr:Instruction, disasm:Disassembler, data, addr, il:LowLevel
         delay_slots += 1
     while delay_slots > 0 and len(data) > offset:
         current_instr = disasm.decode(data[offset:], addr+offset)
-        if current_instr.instr is None:
+        if current_instr is None:
             log_warn('Lifting of delayed instruction interrupted by invalid instruction')
             return None # could not disassemble, abort lifting
-        offset += current_instr.size
+        offset += ARCH_SIZE
         
         il.set_current_address(il.current_address + ARCH_SIZE)
-        delay_slots -= get_delay_consumption(current_instr.instr)
-        if current_instr.mnemonic in INSTRUCTION_DELAY:
+        delay_slots -= get_delay_consumption(current_instr)
+        if current_instr.opcode in INSTRUCTION_DELAY:
             il.append(il.unimplemented())
         else:
-            lift_simple(current_instr.instr, il)
+            lift_simple(current_instr, il)
     il.set_current_address(addr)
     HANDLERS_BY_MNEMONIC[instr.opcode](instr, il)
     return offset
 
 def lift_il(disasm:Disassembler, data, addr, il: LowLevelILFunction):
     instr = disasm.decode(data, addr)
-    if instr.instr is None:
+    if instr is None:
         return None # could not disassemble, do not lift
     
-    if instr.mnemonic in INSTRUCTION_DELAY:
-        return lift_delayed(instr.instr, disasm, data, addr, il)
+    if instr.opcode in INSTRUCTION_DELAY:
+        return lift_delayed(instr, disasm, data, addr, il)
 
-    return lift_simple(instr.instr, il)
+    return lift_simple(instr, il)

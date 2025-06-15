@@ -37,8 +37,11 @@ class TMS320C67x(Architecture):
     
     def get_instruction_text(self, data, addr):
         instruction = self.disasm.decode(data, addr)
-        tokens = gen_tokens(instruction)
-        return tokens, instruction.size
+        if instruction is not None:
+            tokens = gen_tokens(instruction)
+        else:
+            tokens = []
+        return tokens, ARCH_SIZE
     
     def get_instruction_low_level_il(self, data, addr, il):
         return lift_il(self.disasm, data, addr, il)
