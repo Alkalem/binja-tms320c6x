@@ -8,7 +8,7 @@ from enum import IntEnum
 
 from .constants import ARCH_SIZE, LOAD_BASE, REGISTER_NAMES
 from .disassembler import Disassembler as C6xDisassembler
-from .disassembler.types import OperandType
+from .disassembler.types import OperandType, Instruction as C6xInstruction
 
 
 class Operand:
@@ -174,11 +174,12 @@ class Instruction:
     ops: List[Operand]
     parallel: bool
     size: int
+    instr: Optional[C6xInstruction]
 
     @classmethod
     def invalid(cls):
         return Instruction(
-            None, "invalid", None, [], False, ARCH_SIZE
+            '', 'invalid', None, [], False, ARCH_SIZE, None
         )
 
 class Disassembler:
@@ -195,22 +196,22 @@ class Disassembler:
 
         ops = list()
         for operand in instr.operands:
-            match operand.type:
-                case OperandType.CONST:
+            match operand.kind:
+                case OperandType.IMMEDIATE:
                     ops.append(IntegerOperand(operand.value))
                 case OperandType.REGISTER:
-                    ops.append(RegisterOperand(str(operand.value)))
-                case OperandType.ADDRESS:
+                    ops.append(RegisterOperand(str(operand.register)))
+                case OperandType.MEMORY:
                     ops.append(MemoryOperand(
-                        RegisterOperand(str(operand.value[1])),
-                        IntegerOperand(operand.value[2] // 4),
-                        MemoryOperand.Mode(operand.value[0].value)))
+                        RegisterOperand(str(operand.base)),
+                        IntegerOperand(operand.offset // 4),
+                        MemoryOperand.Mode(operand.mode)))
                 case _:
                     raise NotImplementedError('operand type not supported')
 
         return Instruction(
                 str(instr.condition), instr.opcode.upper(), instr.unit,
-                ops, instr.parallel, ARCH_SIZE
+                ops, instr.parallel, ARCH_SIZE, instr
             )
     
     def info(self, data, addr):

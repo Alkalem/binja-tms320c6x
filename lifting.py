@@ -2,7 +2,9 @@ from binaryninja.lowlevelil import LowLevelILFunction, ExpressionIndex
 from binaryninja import log_warn
 
 from .constants import ARCH_SIZE, HALF_SIZE
-from .instruction import Disassembler, Instruction, Operand, IntegerOperand, RegisterOperand
+from .instruction import Disassembler
+from .disassembler.types import Instruction, Operand, ImmediateOperand, \
+        RegisterOperand
 
 
 #TODO: lift conditional execution
@@ -10,41 +12,45 @@ from .instruction import Disassembler, Instruction, Operand, IntegerOperand, Reg
 ## Helpers
 
 def to_il(operand:Operand, il:LowLevelILFunction) -> ExpressionIndex:
-    if isinstance(operand, IntegerOperand):
-        return il.const(HALF_SIZE, operand.get_value())
-    elif isinstance(operand, RegisterOperand):
-        return il.reg(ARCH_SIZE, operand.get_value())
-    else:
-        raise NotImplementedError(f'lifting of {type(operand)}')
+    match operand:
+        case ImmediateOperand(value):
+            return il.const(HALF_SIZE, value)
+        case RegisterOperand(register):
+            return il.reg(ARCH_SIZE, str(register))
+        case _:
+            raise NotImplementedError(f'lifting of {type(operand)}')
 
 
 ## Simple instruction lifting (without delays)
 
 def lift_add(instr:Instruction, il:LowLevelILFunction):
     #TODO: handle all input variants and determine sizes based on ops
-    src1 = to_il(instr.ops[0], il)
-    src2 = to_il(instr.ops[1], il)
-    dst = instr.ops[2].get_value()
+    src1 = to_il(instr.operands[0], il)
+    src2 = to_il(instr.operands[1], il)
+    dst = str(instr.operands[2])
     il.append(il.set_reg(ARCH_SIZE, dst, il.add(
         ARCH_SIZE, src1, src2
     )))
 
 def lift_addk(instr:Instruction, il:LowLevelILFunction):
-    imm = instr.ops[0].get_value()
-    reg = instr.ops[1].get_value()
+    assert isinstance(instr.operands[0], ImmediateOperand)
+    imm = instr.operands[0].value
+    reg = str(instr.operands[1])
     il.append(il.set_reg(ARCH_SIZE, reg, il.add(
         ARCH_SIZE, il.const(HALF_SIZE, imm), il.reg(ARCH_SIZE, reg)
     )))
 
 def lift_mvk(instr: Instruction, il: LowLevelILFunction):
-    imm = instr.ops[0].get_value()
-    reg = instr.ops[1].get_value()
+    assert isinstance(instr.operands[0], ImmediateOperand)
+    imm = instr.operands[0].value
+    reg = str(instr.operands[1])
     value = il.sign_extend(ARCH_SIZE, il.const(HALF_SIZE, imm))
     il.append(il.set_reg(ARCH_SIZE, reg, value))
 
 def lift_mvkh(instr: Instruction, il: LowLevelILFunction):
-    imm = instr.ops[0].get_value()
-    reg = instr.ops[1].get_value()
+    assert isinstance(instr.operands[0], ImmediateOperand)
+    imm = instr.operands[0].value
+    reg = str(instr.operands[1])
     il.append(il.set_reg(ARCH_SIZE, reg+"H", il.const(HALF_SIZE, imm)))
 
 def lift_nop(instr: Instruction, il: LowLevelILFunction):
@@ -54,40 +60,41 @@ def lift_nop(instr: Instruction, il: LowLevelILFunction):
 ## Pseudo-instruction lifting
 
 def lift_mv(instr: Instruction, il: LowLevelILFunction):
-    il.append(il.set_reg(ARCH_SIZE, instr.ops[1].get_value(),
-            il.reg(ARCH_SIZE, instr.ops[0].get_value())))
+    il.append(il.set_reg(ARCH_SIZE, str(instr.operands[1]),
+            il.reg(ARCH_SIZE, str(instr.operands[0]))))
 
 
 ## Delayed instruction lifting
 
 def lift_branch(instr: Instruction, il: LowLevelILFunction):
-    il.append(il.call(il.reg(ARCH_SIZE, instr.ops[0].get_value())))
+    il.append(il.call(il.reg(ARCH_SIZE, str(instr.operands[0]))))
     return
 
 
 HANDLERS_BY_MNEMONIC = {
-    'ADD': lift_add,
-    'ADDK': lift_addk,
-    'B': lift_branch,
-    'MVK': lift_mvk,
-    'MVKL': lift_mvk,
-    'MVKH': lift_mvkh,
-    'MVKLH': lift_mvkh,
-    'NOP': lift_nop,
+    'add': lift_add,
+    'addk': lift_addk,
+    'b': lift_branch,
+    'mvk': lift_mvk,
+    'mvkl': lift_mvk,
+    'mvkh': lift_mvkh,
+    'mvklh': lift_mvkh,
+    'nop': lift_nop,
 
     # Pseudo-instruction
-    'MV': lift_mv
+    'mv': lift_mv
 }
 
 INSTRUCTION_DELAY = {
-    'B': 5
+    'b': 5
 }
 
 def get_delay_consumption(instr:Instruction):
     delay_slots = 1
-    if instr.mnemonic == 'NOP':
-        delay_slots = instr.ops[0].get_value()
-    elif instr.mnemonic == 'IDLE':
+    if instr.opcode == 'nop':
+        assert isinstance(instr.operands[0], ImmediateOperand)
+        delay_slots = instr.operands[0].value
+    elif instr.opcode == 'idle':
         # in theory unlimited, but binja limits delay to 255
         delay_slots = 256
     if instr.parallel:
@@ -96,41 +103,41 @@ def get_delay_consumption(instr:Instruction):
 
 
 def lift_simple(instr:Instruction, il:LowLevelILFunction):
-    if instr.mnemonic not in HANDLERS_BY_MNEMONIC:
+    if instr.opcode not in HANDLERS_BY_MNEMONIC:
         il.append(il.unimplemented())
     else:
-        HANDLERS_BY_MNEMONIC[instr.mnemonic](instr, il)
-    return instr.size
+        HANDLERS_BY_MNEMONIC[instr.opcode](instr, il)
+    return ARCH_SIZE
 
 def lift_delayed(instr:Instruction, disasm:Disassembler, data, addr, il:LowLevelILFunction):
-    delay_slots = INSTRUCTION_DELAY[instr.mnemonic]
-    offset = instr.size
+    delay_slots = INSTRUCTION_DELAY[instr.opcode]
+    offset = ARCH_SIZE
     if instr.parallel:
         # current fetch packet needs to be finished first
         delay_slots += 1
     while delay_slots > 0 and len(data) > offset:
         current_instr = disasm.decode(data[offset:], addr+offset)
-        if instr == Instruction.invalid():
+        if current_instr.instr is None:
             log_warn('Lifting of delayed instruction interrupted by invalid instruction')
             return None # could not disassemble, abort lifting
         offset += current_instr.size
         
         il.set_current_address(il.current_address + ARCH_SIZE)
-        delay_slots -= get_delay_consumption(current_instr)
+        delay_slots -= get_delay_consumption(current_instr.instr)
         if current_instr.mnemonic in INSTRUCTION_DELAY:
             il.append(il.unimplemented())
         else:
-            lift_simple(current_instr, il)
+            lift_simple(current_instr.instr, il)
     il.set_current_address(addr)
-    HANDLERS_BY_MNEMONIC[instr.mnemonic](instr, il)
+    HANDLERS_BY_MNEMONIC[instr.opcode](instr, il)
     return offset
 
 def lift_il(disasm:Disassembler, data, addr, il: LowLevelILFunction):
     instr = disasm.decode(data, addr)
-    if instr == Instruction.invalid():
+    if instr.instr is None:
         return None # could not disassemble, do not lift
     
     if instr.mnemonic in INSTRUCTION_DELAY:
-        return lift_delayed(instr, disasm, data, addr, il)
+        return lift_delayed(instr.instr, disasm, data, addr, il)
 
-    return lift_simple(instr, il)
+    return lift_simple(instr.instr, il)
