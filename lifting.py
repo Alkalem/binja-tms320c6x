@@ -67,8 +67,10 @@ def lift_mv(instr: Instruction, il: LowLevelILFunction):
 ## Delayed instruction lifting
 
 def lift_branch(instr: Instruction, il: LowLevelILFunction):
-    il.append(il.call(il.reg(ARCH_SIZE, str(instr.operands[0]))))
-    return
+    if str(instr.operands[0]) == 'B3':
+        il.append(il.ret(il.reg(ARCH_SIZE, str(instr.operands[0]))))
+    else:
+        il.append(il.call(il.reg(ARCH_SIZE, str(instr.operands[0]))))
 
 
 HANDLERS_BY_MNEMONIC = {
@@ -96,9 +98,10 @@ def get_delay_consumption(instr:Instruction):
         delay_slots = instr.operands[0].value
     elif instr.opcode == 'idle':
         # in theory unlimited, but binja limits delay to 255
-        delay_slots = 256
+        delay_slots = 255
     if instr.parallel:
-        delay_slots -= 1
+        #NOTE: this currently breaks with multiple parallel NOP-type instructions
+        delay_slots -= 1 
     return delay_slots
 
 
@@ -115,6 +118,7 @@ def lift_delayed(instr:Instruction, disasm:Disassembler, data, addr, il:LowLevel
     if instr.parallel:
         # current fetch packet needs to be finished first
         delay_slots += 1
+    #NOTE: this does not account for NOP-type instructions earlier in fetch packet
     while delay_slots > 0 and len(data) > offset:
         current_instr = disasm.decode(data[offset:], addr+offset)
         if current_instr is None:
