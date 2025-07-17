@@ -179,7 +179,12 @@ def lift_delayed_packet(packet:List[Instruction], disasm:Disassembler,
                 new_delay = INSTRUCTION_DELAY[instr.opcode]
                 while len(delay_slots) < new_delay+1:
                     delay_slots.append(list())
-                delay_slots[new_delay].append((current_addr,instr))
+                if instr.opcode == 'b': 
+                    # branching is always last action in execution packet
+                    delay_slots[new_delay].append((current_addr,instr))
+                else:
+                    delay_slots[new_delay].insert(0, (current_addr,instr))
+                lifted_bytes += ARCH_SIZE
             else:
                 lifted_bytes += lift_simple(instr, il)
         consumed_slots = max([get_delay_consumption(instr) for instr in packet])
