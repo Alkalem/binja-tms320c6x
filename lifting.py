@@ -154,24 +154,21 @@ def lift_simple(instr:Instruction, il:LowLevelILFunction):
         HANDLERS_BY_MNEMONIC[instr.opcode](instr, il)
     return ARCH_SIZE
 
-def lift_simple_packet(packet:List[Instruction], addr:int, il:LowLevelILFunction):
+def lift_simple_packet(packet:List[Instruction], il:LowLevelILFunction):
     lifted_bytes = 0
-    for i, instr in enumerate(packet):
+    for instr in packet:
         if instr is None: break # could not disassemble, do not lift
-        offset = i*ARCH_SIZE
-        il.set_current_address(addr + offset)
+        il.set_current_address(instr.address)
         lifted_bytes += lift_simple(instr, il)
     return lifted_bytes
 
 def lift_delayed_packet(packet:List[Instruction], disasm:Disassembler, 
-        stream, addr, il:LowLevelILFunction):
+        stream, il:LowLevelILFunction):
     lifted_bytes = 0
     delay_slots = list()
     while True:
-        for i, instr in enumerate(packet):
-            offset = i*ARCH_SIZE
-            current_addr = addr + offset
-            il.set_current_address(current_addr)
+        for instr in packet:
+            il.set_current_address(instr.address)
             if instr is None:
                 log_warn('Lifting of delayed instruction interrupted by invalid instruction')
                 return lifted_bytes
@@ -181,9 +178,9 @@ def lift_delayed_packet(packet:List[Instruction], disasm:Disassembler,
                     delay_slots.append(list())
                 if instr.opcode == 'b': 
                     # branching is always last action in execution packet
-                    delay_slots[new_delay].append((current_addr,instr))
+                    delay_slots[new_delay].append(instr)
                 else:
-                    delay_slots[new_delay].insert(0, (current_addr,instr))
+                    delay_slots[new_delay].insert(0, instr)
                 lifted_bytes += ARCH_SIZE
             else:
                 lifted_bytes += lift_simple(instr, il)
@@ -191,12 +188,11 @@ def lift_delayed_packet(packet:List[Instruction], disasm:Disassembler,
         for _ in range(consumed_slots):
             if len(delay_slots) == 0: break
             slot = delay_slots.pop(0)
-            for current_addr, instr in slot:
-                il.set_current_address(current_addr)
+            for instr in slot:
+                il.set_current_address(instr.address)
                 HANDLERS_BY_MNEMONIC[instr.opcode](instr, il)
         
         if len(delay_slots) == 0: break
-        addr += len(packet)*ARCH_SIZE
         packet = get_execution_packet(disasm, stream)
         if len(packet) == 0:
             log_warn('Lifting of delayed instruction interrupted by empty stream')
@@ -210,9 +206,9 @@ def lift_il(disasm:Disassembler, data:bytes, addr:int, il: LowLevelILFunction):
     if any([instr.opcode in INSTRUCTION_DELAY for instr in execution_packet
             if instr is not None]):
         return lift_delayed_packet(execution_packet, disasm, 
-                instruction_stream, addr, il)
+                instruction_stream, il)
 
-    return lift_simple_packet(execution_packet, addr, il)
+    return lift_simple_packet(execution_packet, il)
 
 
 def gen_instructions(data:bytes, addr:int):
