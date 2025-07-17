@@ -1,6 +1,8 @@
 from binaryninja.lowlevelil import LowLevelILFunction, ExpressionIndex
 from binaryninja import log_warn
 
+from typing import List
+
 from .constants import ARCH_SIZE, HALF_SIZE
 from .instruction import Disassembler
 from .disassembler.types import Instruction, Operand, ImmediateOperand, \
@@ -99,9 +101,6 @@ def get_delay_consumption(instr:Instruction):
     elif instr.opcode == 'idle':
         # in theory unlimited, but binja limits delay to 255
         delay_slots = 255
-    if instr.parallel:
-        #NOTE: this currently breaks with multiple parallel NOP-type instructions
-        delay_slots -= 1 
     return delay_slots
 
 
@@ -112,36 +111,82 @@ def lift_simple(instr:Instruction, il:LowLevelILFunction):
         HANDLERS_BY_MNEMONIC[instr.opcode](instr, il)
     return ARCH_SIZE
 
-def lift_delayed(instr:Instruction, disasm:Disassembler, data, addr, il:LowLevelILFunction):
-    delay_slots = INSTRUCTION_DELAY[instr.opcode]
-    offset = ARCH_SIZE
-    if instr.parallel:
-        # current fetch packet needs to be finished first
-        delay_slots += 1
-    #NOTE: this does not account for NOP-type instructions earlier in fetch packet
-    while delay_slots > 0 and len(data) > offset:
-        current_instr = disasm.decode(data[offset:], addr+offset)
-        if current_instr is None:
-            log_warn('Lifting of delayed instruction interrupted by invalid instruction')
-            return None # could not disassemble, abort lifting
-        offset += ARCH_SIZE
+def lift_simple_packet(packet:List[Instruction], addr:int, il:LowLevelILFunction):
+    lifted_bytes = 0
+    for i, instr in enumerate(packet):
+        if instr is None: break # could not disassemble, do not lift
+        offset = i*ARCH_SIZE
+        il.set_current_address(addr + offset)
+        lifted_bytes += lift_simple(instr, il)
+    return lifted_bytes
+
+def lift_delayed_packet(packet:List[Instruction], disasm:Disassembler, 
+        stream, addr, il:LowLevelILFunction):
+    lifted_bytes = 0
+    delay_slots = list()
+    while True:
+        for i, instr in enumerate(packet):
+            offset = i*ARCH_SIZE
+            current_addr = addr + offset
+            il.set_current_address(current_addr)
+            if instr is None:
+                log_warn('Lifting of delayed instruction interrupted by invalid instruction')
+                return lifted_bytes
+            if instr.opcode in INSTRUCTION_DELAY:
+                new_delay = INSTRUCTION_DELAY[instr.opcode]
+                while len(delay_slots) < new_delay+1:
+                    delay_slots.append(list())
+                delay_slots[new_delay].append((current_addr,instr))
+            else:
+                lifted_bytes += lift_simple(instr, il)
+        consumed_slots = max([get_delay_consumption(instr) for instr in packet])
+        for _ in range(consumed_slots):
+            if len(delay_slots) == 0: break
+            slot = delay_slots.pop(0)
+            for current_addr, instr in slot:
+                il.set_current_address(current_addr)
+                HANDLERS_BY_MNEMONIC[instr.opcode](instr, il)
         
-        il.set_current_address(il.current_address + ARCH_SIZE)
-        delay_slots -= get_delay_consumption(current_instr)
-        if current_instr.opcode in INSTRUCTION_DELAY:
-            il.append(il.unimplemented())
-        else:
-            lift_simple(current_instr, il)
-    il.set_current_address(addr)
-    HANDLERS_BY_MNEMONIC[instr.opcode](instr, il)
-    return offset
+        if len(delay_slots) == 0: break
+        addr += len(packet)*ARCH_SIZE
+        packet = get_execution_packet(disasm, stream)
+        if len(packet) == 0:
+            log_warn('Lifting of delayed instruction interrupted by empty stream')
+            break
+    return lifted_bytes
 
-def lift_il(disasm:Disassembler, data, addr, il: LowLevelILFunction):
-    instr = disasm.decode(data, addr)
-    if instr is None:
-        return None # could not disassemble, do not lift
+def lift_il(disasm:Disassembler, data:bytes, addr:int, il: LowLevelILFunction):
+    instruction_stream = gen_instructions(data, addr)
+    execution_packet = get_execution_packet(disasm, instruction_stream)
     
-    if instr.opcode in INSTRUCTION_DELAY:
-        return lift_delayed(instr, disasm, data, addr, il)
+    if any([instr.opcode in INSTRUCTION_DELAY for instr in execution_packet
+            if instr is not None]):
+        return lift_delayed_packet(execution_packet, disasm, 
+                instruction_stream, addr, il)
 
-    return lift_simple(instr, il)
+    return lift_simple_packet(execution_packet, addr, il)
+
+
+def gen_instructions(data:bytes, addr:int):
+    offset = 0
+    while len(data) >= offset+ARCH_SIZE:
+        yield (addr+offset, data[offset : offset+ARCH_SIZE])
+        offset += ARCH_SIZE
+
+def get_execution_packet(disasm:Disassembler, stream) -> List[Instruction]:
+    execution_packet = list()
+    while True:
+        try:
+            current_addr, instr_bytes = next(stream)
+        except StopIteration:
+            break
+        instr = disasm.decode(instr_bytes, current_addr)
+        execution_packet.append(instr)
+        if instr is None: break
+        # A fetch packets end at an 8 instruction aligned address,
+        # parallel bit chains instructions in same execution packet.
+        if not (instr.parallel and ((current_addr+4) % (ARCH_SIZE * 8))): break
+    return execution_packet
+        
+
+
