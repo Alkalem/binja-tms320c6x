@@ -3,7 +3,7 @@ from binaryninja import log_warn
 
 from typing import List
 
-from .constants import ARCH_SIZE, HALF_SIZE
+from .constants import ARCH_SIZE, HW_SIZE, DW_SIZE
 from .instruction import Disassembler
 from .disassembler.types import Instruction, Operand, ImmediateOperand, \
         RegisterOperand, MemoryOperand, Register, AddressingMode
@@ -16,7 +16,7 @@ from .disassembler.types import Instruction, Operand, ImmediateOperand, \
 def to_il(operand:Operand, il:LowLevelILFunction) -> ExpressionIndex:
     match operand:
         case ImmediateOperand(value):
-            return il.const(HALF_SIZE, value)
+            return il.const(HW_SIZE, value)
         case RegisterOperand(register):
             return il.reg(ARCH_SIZE, str(register))
         case MemoryOperand(mode, base, offset):
@@ -30,10 +30,10 @@ def to_il(operand:Operand, il:LowLevelILFunction) -> ExpressionIndex:
                     offset_il = il.neg_expr(ARCH_SIZE, offset_il)
                 case AddressingMode.PREDECREMENT:
                     il.append(il.set_reg(ARCH_SIZE, str(base), 
-                            il.sub(ARCH_SIZE, base_il, il.const(ARCH_SIZE, ARCH_SIZE))))
+                            il.sub(ARCH_SIZE, base_il, il.const(ARCH_SIZE, DW_SIZE))))
                 case AddressingMode.PREINCREMENT:
                     il.append(il.set_reg(ARCH_SIZE, str(base), 
-                            il.add(ARCH_SIZE, base_il, il.const(ARCH_SIZE, ARCH_SIZE))))
+                            il.add(ARCH_SIZE, base_il, il.const(ARCH_SIZE, DW_SIZE))))
             return il.add(ARCH_SIZE, base_il, offset_il)
         case _:
             raise NotImplementedError(f'lifting of {type(operand)}')
@@ -45,10 +45,10 @@ def post_instr(operand:Operand, il:LowLevelILFunction):
             match mode:
                 case AddressingMode.POSTDECREMENT:
                     il.append(il.set_reg(ARCH_SIZE, str(base), 
-                            il.sub(ARCH_SIZE, base_il, il.const(ARCH_SIZE, ARCH_SIZE))))
+                            il.sub(ARCH_SIZE, base_il, il.const(ARCH_SIZE, DW_SIZE))))
                 case AddressingMode.POSTINCREMENT:
                     il.append(il.set_reg(ARCH_SIZE, str(base), 
-                            il.add(ARCH_SIZE, base_il, il.const(ARCH_SIZE, ARCH_SIZE))))
+                            il.add(ARCH_SIZE, base_il, il.const(ARCH_SIZE, DW_SIZE))))
 
 
 ## Simple instruction lifting (without delays)
@@ -67,21 +67,21 @@ def lift_addk(instr:Instruction, il:LowLevelILFunction):
     imm = instr.operands[0].value
     reg = str(instr.operands[1])
     il.append(il.set_reg(ARCH_SIZE, reg, il.add(
-        ARCH_SIZE, il.const(HALF_SIZE, imm), il.reg(ARCH_SIZE, reg)
+        ARCH_SIZE, il.const(HW_SIZE, imm), il.reg(ARCH_SIZE, reg)
     )))
 
 def lift_mvk(instr: Instruction, il: LowLevelILFunction):
     assert isinstance(instr.operands[0], ImmediateOperand)
     imm = instr.operands[0].value
     reg = str(instr.operands[1])
-    value = il.sign_extend(ARCH_SIZE, il.const(HALF_SIZE, imm))
+    value = il.sign_extend(ARCH_SIZE, il.const(HW_SIZE, imm))
     il.append(il.set_reg(ARCH_SIZE, reg, value))
 
 def lift_mvkh(instr: Instruction, il: LowLevelILFunction):
     assert isinstance(instr.operands[0], ImmediateOperand)
     imm = instr.operands[0].value
     reg = str(instr.operands[1])
-    il.append(il.set_reg(ARCH_SIZE, reg+"H", il.const(HALF_SIZE, imm)))
+    il.append(il.set_reg(ARCH_SIZE, reg+"H", il.const(HW_SIZE, imm)))
 
 def lift_nop(instr: Instruction, il: LowLevelILFunction):
     il.append(il.nop())
