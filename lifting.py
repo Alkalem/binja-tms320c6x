@@ -6,7 +6,7 @@ from typing import List
 from .constants import ARCH_SIZE, HALF_SIZE
 from .instruction import Disassembler
 from .disassembler.types import Instruction, Operand, ImmediateOperand, \
-        RegisterOperand
+        RegisterOperand, MemoryOperand, Register, AddressingMode
 
 
 #TODO: lift conditional execution
@@ -19,8 +19,36 @@ def to_il(operand:Operand, il:LowLevelILFunction) -> ExpressionIndex:
             return il.const(HALF_SIZE, value)
         case RegisterOperand(register):
             return il.reg(ARCH_SIZE, str(register))
+        case MemoryOperand(mode, base, offset):
+            base_il = il.reg(ARCH_SIZE, str(base))
+            if isinstance(offset, Register):
+                offset_il = il.reg(ARCH_SIZE, str(offset))
+            else:
+                offset_il = il.const(ARCH_SIZE, offset)
+            match mode:
+                case AddressingMode.NEG_OFFSET:
+                    offset_il = il.neg_expr(ARCH_SIZE, offset_il)
+                case AddressingMode.PREDECREMENT:
+                    il.append(il.set_reg(ARCH_SIZE, str(base), 
+                            il.sub(ARCH_SIZE, base_il, il.const(ARCH_SIZE, ARCH_SIZE))))
+                case AddressingMode.PREINCREMENT:
+                    il.append(il.set_reg(ARCH_SIZE, str(base), 
+                            il.add(ARCH_SIZE, base_il, il.const(ARCH_SIZE, ARCH_SIZE))))
+            return il.add(ARCH_SIZE, base_il, offset_il)
         case _:
             raise NotImplementedError(f'lifting of {type(operand)}')
+
+def post_instr(operand:Operand, il:LowLevelILFunction):
+    match operand:
+        case MemoryOperand(mode, base, offset):
+            base_il = il.reg(ARCH_SIZE, str(base))
+            match mode:
+                case AddressingMode.POSTDECREMENT:
+                    il.append(il.set_reg(ARCH_SIZE, str(base), 
+                            il.sub(ARCH_SIZE, base_il, il.const(ARCH_SIZE, ARCH_SIZE))))
+                case AddressingMode.POSTINCREMENT:
+                    il.append(il.set_reg(ARCH_SIZE, str(base), 
+                            il.add(ARCH_SIZE, base_il, il.const(ARCH_SIZE, ARCH_SIZE))))
 
 
 ## Simple instruction lifting (without delays)
@@ -74,23 +102,38 @@ def lift_branch(instr: Instruction, il: LowLevelILFunction):
     else:
         il.append(il.call(il.reg(ARCH_SIZE, str(instr.operands[0]))))
 
+def lift_ldw(instr:Instruction, il:LowLevelILFunction):
+    src = to_il(instr.operands[0], il)
+    il.append(il.set_reg(ARCH_SIZE, str(instr.operands[1]), il.load(ARCH_SIZE, src)))
+    post_instr(instr.operands[0], il)
+
+def lift_stw(instr:Instruction, il:LowLevelILFunction):
+    value = to_il(instr.operands[0], il)
+    dest = to_il(instr.operands[1], il)
+    il.append(il.store(ARCH_SIZE, dest, value))
+    post_instr(instr.operands[1], il)
+
 
 HANDLERS_BY_MNEMONIC = {
     'add': lift_add,
     'addk': lift_addk,
     'b': lift_branch,
+    'ldw': lift_ldw,
     'mvk': lift_mvk,
     'mvkl': lift_mvk,
     'mvkh': lift_mvkh,
     'mvklh': lift_mvkh,
     'nop': lift_nop,
+    'stw': lift_stw,
 
     # Pseudo-instruction
     'mv': lift_mv
 }
 
 INSTRUCTION_DELAY = {
-    'b': 5
+    'b': 5,
+    'ldw': 4,
+    'stw': 4
 }
 
 def get_delay_consumption(instr:Instruction):
