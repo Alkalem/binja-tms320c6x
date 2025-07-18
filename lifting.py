@@ -71,6 +71,18 @@ def lift_addk(instr:Instruction, il:LowLevelILFunction):
         ARCH_SIZE, il.const(HW_SIZE, imm), il.reg(ARCH_SIZE, reg)
     )))
 
+def lift_cmpeq(instr:Instruction, il:LowLevelILFunction):
+    src1 = to_il(instr.operands[0], il)
+    src2 = to_il(instr.operands[1], il)
+    il.append(il.set_reg(ARCH_SIZE, str(instr.operands[2]), 
+            il.compare_equal(ARCH_SIZE, src1, src2)))
+    
+def lift_cmplt(instr:Instruction, il:LowLevelILFunction):
+    src1 = to_il(instr.operands[0], il)
+    src2 = to_il(instr.operands[1], il)
+    il.append(il.set_reg(ARCH_SIZE, str(instr.operands[2]), 
+            il.compare_signed_less_than(ARCH_SIZE, src1, src2)))
+
 def lift_mvk(instr: Instruction, il: LowLevelILFunction):
     assert isinstance(instr.operands[0], ImmediateOperand)
     imm = instr.operands[0].value
@@ -181,6 +193,8 @@ HANDLERS_BY_MNEMONIC = {
     'add': lift_add,
     'addk': lift_addk,
     'b': lift_branch,
+    'cmpeq': lift_cmpeq,
+    'cmplt': lift_cmplt,
     'ldw': lift_ldw,
     'mpyi': lift_mpyi,
     'mvk': lift_mvk,
