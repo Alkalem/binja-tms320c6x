@@ -1,5 +1,6 @@
 from binaryninja.architecture import Architecture
 from binaryninja.function import RegisterInfo
+from binaryninja import CallingConvention
 
 from .instruction import Disassembler, gen_tokens, RegisterOperand
 from .constants import *
@@ -45,3 +46,24 @@ class TMS320C67x(Architecture):
     
     def get_instruction_low_level_il(self, data, addr, il):
         return lift_il(self.disasm, data, addr, il)
+    
+class C67Call(CallingConvention):
+    name = 'c67call'
+
+    caller_saved_regs = [
+        'A0', 'B0', 'A1', 'B1', 'A2', 'B2', 'A3', 
+        'A4', 'B4', 'A5', 'B5', 'A6', 'B6', 'A7', 'B7',
+        'A8', 'B8', 'A9', 'B9', 'A10', 'B10', 'A11', 'B11',
+        'A12', 'B12', 'A13', 'B13', 'A14', 'B14'
+    ]
+    callee_saved_regs = [
+        'B3', 'A15', 'B15'
+    ]
+    int_arg_regs = [
+        'A4', 'B4', 'A6', 'B6', 'A8', 'B8'
+    ]
+
+    eligible_for_heuristics = True
+    int_return_reg = 'A4'
+    high_int_return_reg = 'A5'
+
