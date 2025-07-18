@@ -1,4 +1,5 @@
-from binaryninja.lowlevelil import LowLevelILFunction, ExpressionIndex
+from binaryninja.lowlevelil import LowLevelILFunction, ExpressionIndex, \
+        LLIL_TEMP, LLIL_GET_TEMP_REG_INDEX
 from binaryninja import log_warn
 
 from typing import List
@@ -93,25 +94,73 @@ def lift_mv(instr: Instruction, il: LowLevelILFunction):
     il.append(il.set_reg(ARCH_SIZE, str(instr.operands[1]),
             il.reg(ARCH_SIZE, str(instr.operands[0]))))
 
+## Temporary IL registers
+max_temp_reg = 0
+free_temp_regs:List[int] = list()
+
+def alloc_temp() -> int:
+    global max_temp_reg
+    if len(free_temp_regs) == 0:
+        reg = max_temp_reg
+        max_temp_reg += 1
+        return reg
+    else:
+        return free_temp_regs.pop()
+
+def store_temp(reg_id:int, value, il):
+    tmp = LLIL_TEMP(reg_id)
+    il.append(il.set_reg(ARCH_SIZE, tmp, value))
+
+def get_temp(reg_id, il):
+    tmp = LLIL_TEMP(reg_id)
+    return il.reg(ARCH_SIZE, tmp)
+
+def free_temp(tmp):
+    free_temp_regs.append(LLIL_GET_TEMP_REG_INDEX(tmp))
+
 
 ## Delayed instruction lifting
 
-def lift_branch(instr: Instruction, il: LowLevelILFunction):
-    if str(instr.operands[0]) == 'B3':
-        il.append(il.ret(il.reg(ARCH_SIZE, str(instr.operands[0]))))
-    else:
-        il.append(il.call(il.reg(ARCH_SIZE, str(instr.operands[0]))))
+
+def lift_branch(instr:Instruction, il:LowLevelILFunction):
+    target = alloc_temp()
+    store_temp(target, il.reg(ARCH_SIZE, str(instr.operands[0])), il)
+
+    def branch(il:LowLevelILFunction):
+        il.set_current_address(instr.address)
+        addr = get_temp(target, il)
+        if str(instr.operands[0]) == 'B3':
+            il.append(il.ret(addr))
+        else:
+            il.append(il.call(addr))
+        free_temp(target)
+    return ((5, branch),)
 
 def lift_ldw(instr:Instruction, il:LowLevelILFunction):
-    src = to_il(instr.operands[0], il)
-    il.append(il.set_reg(ARCH_SIZE, str(instr.operands[1]), il.load(ARCH_SIZE, src)))
+    src = alloc_temp()
+    store_temp(src, to_il(instr.operands[0], il), il)
     post_instr(instr.operands[0], il)
 
+    def load(il:LowLevelILFunction):
+        il.set_current_address(instr.address)
+        value = il.load(ARCH_SIZE, get_temp(src, il))
+        il.append(il.set_reg(ARCH_SIZE, str(instr.operands[1]), value))
+        free_temp(src)
+    return ((4, load),)
+
 def lift_stw(instr:Instruction, il:LowLevelILFunction):
-    value = to_il(instr.operands[0], il)
-    dest = to_il(instr.operands[1], il)
-    il.append(il.store(ARCH_SIZE, dest, value))
+    value = alloc_temp()
+    store_temp(value, to_il(instr.operands[0], il), il)
+    dest = alloc_temp()
+    store_temp(dest, to_il(instr.operands[1], il), il)
     post_instr(instr.operands[1], il)
+    
+    def store(il:LowLevelILFunction):
+        il.set_current_address(instr.address)
+        il.append(il.store(ARCH_SIZE, get_temp(dest, il), get_temp(value, il)))
+        free_temp(value)
+        free_temp(dest)
+    return ((4, store),)
 
 
 HANDLERS_BY_MNEMONIC = {
@@ -176,11 +225,12 @@ def lift_delayed_packet(packet:List[Instruction], disasm:Disassembler,
                 new_delay = INSTRUCTION_DELAY[instr.opcode]
                 while len(delay_slots) < new_delay+1:
                     delay_slots.append(list())
-                if instr.opcode == 'b': 
-                    # branching is always last action in execution packet
-                    delay_slots[new_delay].append(instr)
-                else:
-                    delay_slots[new_delay].insert(0, instr)
+                for delay, callback in HANDLERS_BY_MNEMONIC[instr.opcode](instr, il):
+                    if instr.opcode == 'b': 
+                        # branching is always last action in execution packet
+                        delay_slots[delay].append(callback)
+                    else:
+                        delay_slots[delay].insert(0, callback)
                 lifted_bytes += ARCH_SIZE
             else:
                 lifted_bytes += lift_simple(instr, il)
@@ -188,9 +238,8 @@ def lift_delayed_packet(packet:List[Instruction], disasm:Disassembler,
         for _ in range(consumed_slots):
             if len(delay_slots) == 0: break
             slot = delay_slots.pop(0)
-            for instr in slot:
-                il.set_current_address(instr.address)
-                HANDLERS_BY_MNEMONIC[instr.opcode](instr, il)
+            for callback in slot:
+                callback(il)
         
         if len(delay_slots) == 0: break
         packet = get_execution_packet(disasm, stream)
