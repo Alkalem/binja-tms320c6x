@@ -148,6 +148,20 @@ def lift_ldw(instr:Instruction, il:LowLevelILFunction):
         free_temp(src)
     return ((4, load),)
 
+def lift_mpyi(instr:Instruction, il:LowLevelILFunction):
+    src1 = alloc_temp()
+    store_temp(src1, to_il(instr.operands[0], il), il)
+    src2 = alloc_temp()
+    store_temp(src2, to_il(instr.operands[1], il), il)
+    
+    def result(il):
+        il.set_current_address(instr.address)
+        il.append(il.set_reg(ARCH_SIZE, str(instr.operands[2]), 
+            il.mult(ARCH_SIZE, get_temp(src1, il), get_temp(src2, il))))
+        free_temp(src1)
+        free_temp(src2)
+    return ((8, result),)
+
 def lift_stw(instr:Instruction, il:LowLevelILFunction):
     value = alloc_temp()
     store_temp(value, to_il(instr.operands[0], il), il)
@@ -168,6 +182,7 @@ HANDLERS_BY_MNEMONIC = {
     'addk': lift_addk,
     'b': lift_branch,
     'ldw': lift_ldw,
+    'mpyi': lift_mpyi,
     'mvk': lift_mvk,
     'mvkl': lift_mvk,
     'mvkh': lift_mvkh,
@@ -182,6 +197,7 @@ HANDLERS_BY_MNEMONIC = {
 INSTRUCTION_DELAY = {
     'b': 5,
     'ldw': 4,
+    'mpyi': 8,
     'stw': 4
 }
 
