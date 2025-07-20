@@ -148,6 +148,18 @@ def lift_branch(instr:Instruction, il:LowLevelILFunction):
         free_temp(target)
     return ((5, branch),)
 
+def lift_ldb(instr:Instruction, il:LowLevelILFunction):
+    src = alloc_temp()
+    store_temp(src, to_il(instr.operands[0], il), il)
+    post_instr(instr.operands[0], il)
+
+    def load(il:LowLevelILFunction):
+        il.set_current_address(instr.address)
+        value = il.load(1, get_temp(src, il))
+        il.append(il.set_reg(ARCH_SIZE, str(instr.operands[1]), value))
+        free_temp(src)
+    return ((4, load),)
+
 def lift_ldw(instr:Instruction, il:LowLevelILFunction):
     src = alloc_temp()
     store_temp(src, to_il(instr.operands[0], il), il)
@@ -174,6 +186,20 @@ def lift_mpyi(instr:Instruction, il:LowLevelILFunction):
         free_temp(src2)
     return ((8, result),)
 
+def lift_stb(instr:Instruction, il:LowLevelILFunction):
+    value = alloc_temp()
+    store_temp(value, to_il(instr.operands[0], il), il)
+    dest = alloc_temp()
+    store_temp(dest, to_il(instr.operands[1], il), il)
+    post_instr(instr.operands[1], il)
+    
+    def store(il:LowLevelILFunction):
+        il.set_current_address(instr.address)
+        il.append(il.store(1, get_temp(dest, il), get_temp(value, il)))
+        free_temp(value)
+        free_temp(dest)
+    return ((4, store),)
+
 def lift_stw(instr:Instruction, il:LowLevelILFunction):
     value = alloc_temp()
     store_temp(value, to_il(instr.operands[0], il), il)
@@ -195,6 +221,7 @@ HANDLERS_BY_MNEMONIC = {
     'b': lift_branch,
     'cmpeq': lift_cmpeq,
     'cmplt': lift_cmplt,
+    'ldb': lift_ldb,
     'ldw': lift_ldw,
     'mpyi': lift_mpyi,
     'mvk': lift_mvk,
@@ -202,6 +229,7 @@ HANDLERS_BY_MNEMONIC = {
     'mvkh': lift_mvkh,
     'mvklh': lift_mvkh,
     'nop': lift_nop,
+    'stb': lift_stb,
     'stw': lift_stw,
 
     # Pseudo-instruction
@@ -210,9 +238,11 @@ HANDLERS_BY_MNEMONIC = {
 
 INSTRUCTION_DELAY = {
     'b': 5,
+    'ldb': 4,
     'ldw': 4,
     'mpyi': 8,
-    'stw': 4
+    'stb': 4,
+    'stw': 4,
 }
 
 def get_delay_consumption(instr:Instruction):
