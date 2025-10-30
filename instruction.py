@@ -3,7 +3,7 @@ from binaryninja.enums import InstructionTextTokenType, BranchType
 from binaryninja import log_warn
 
 from dataclasses import dataclass
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Generator
 
 from .constants import ARCH_SIZE, LOAD_BASE
 from .disassembler import Disassembler as C6xDisassembler
@@ -16,6 +16,8 @@ class Disassembler:
     def __init__(self):
         self.__dis = C6xDisassembler()
     
+    def disasm(self, data, addr) -> Generator[Instruction, Any, None]:
+        return self.__dis.disasm(data, addr)
 
     def decode(self, data, addr) -> Optional[Instruction]:
         try:

@@ -9,3 +9,12 @@ REGISTER_NAMES = [
 ] + [
     f'B{i}' for i in range(16)
 ]
+
+INSTRUCTION_DELAY = {
+    'b': 5,
+    'ldb': 4,
+    'ldw': 4,
+    'mpyi': 8,
+    'stb': 4,
+    'stw': 4,
+}
