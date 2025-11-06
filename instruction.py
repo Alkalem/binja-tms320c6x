@@ -205,11 +205,11 @@ def gen_tokens(instr: Instruction, offset: int):
             )
             tokens.extend(_gen_operand_tokens(op))
 
+    tokens.append(
+            InstructionTextToken(
+                InstructionTextTokenType.NewLineToken, "", 
+                offset))
     if instr.parallel:
-        tokens.append(
-                InstructionTextToken(
-                    InstructionTextTokenType.NewLineToken, "", 
-                    offset+ARCH_SIZE))
         tokens.append(
             InstructionTextToken(
                 InstructionTextTokenType.TextToken, 
