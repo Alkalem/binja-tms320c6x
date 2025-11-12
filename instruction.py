@@ -1,9 +1,8 @@
-from binaryninja.function import InstructionTextToken, InstructionInfo
+from binaryninja.architecture import InstructionTextToken, InstructionInfo
 from binaryninja.enums import InstructionTextTokenType, BranchType
-from binaryninja import log_warn
+from binaryninja.log import log_warn
 
-from dataclasses import dataclass
-from typing import Optional, List, Any
+from typing import Any, Generator, Optional
 
 from .constants import ARCH_SIZE, LOAD_BASE
 from .disassembler import Disassembler as C6xDisassembler
@@ -16,6 +15,8 @@ class Disassembler:
     def __init__(self):
         self.__dis = C6xDisassembler()
     
+    def disasm(self, data, addr, limit=-1) -> Generator[Instruction, Any, None]:
+        return self.__dis.disasm(data, addr, count=limit)
 
     def decode(self, data, addr) -> Optional[Instruction]:
         try:
@@ -65,7 +66,7 @@ class Disassembler:
                 if instr.condition.branch == False:
                     result.add_branch(BranchType.FalseBranch)
                     result.add_branch(BranchType.TrueBranch, 
-                            addr+ (instruction_delay+1)*4)
+                            addr + (instruction_delay+1)*4)
                 else:
                     result.add_branch(BranchType.TrueBranch)
                     result.add_branch(BranchType.FalseBranch, 
@@ -156,7 +157,7 @@ def _gen_operand_tokens(operand: Operand):
         case _:
             raise NotImplementedError(f'operand type {type(operand)}')
 
-def gen_tokens(instr: Instruction):
+def gen_tokens(instr: Instruction, offset: int):
     tokens = list()
     if instr.condition.branch is not None and instr.condition.register:
         tokens.extend([
@@ -170,9 +171,10 @@ def gen_tokens(instr: Instruction):
             InstructionTextToken(
                 InstructionTextTokenType.TextToken, "]"),
         ])
+    align = 6 if offset else 9
     tokens.append(
         InstructionTextToken(
-            InstructionTextTokenType.TextToken, ' ' * (6-len(str(instr.condition)))),   
+            InstructionTextTokenType.TextToken, ' ' * (align-len(str(instr.condition)))),   
     )
 
     tokens.append(
@@ -203,11 +205,16 @@ def gen_tokens(instr: Instruction):
             )
             tokens.extend(_gen_operand_tokens(op))
 
+    tokens.append(
+            InstructionTextToken(
+                InstructionTextTokenType.NewLineToken, "", 
+                offset))
     if instr.parallel:
         tokens.append(
             InstructionTextToken(
                 InstructionTextTokenType.TextToken, 
-                " ||")
+                "|| ")
         )
+
 
     return tokens
