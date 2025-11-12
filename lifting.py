@@ -23,7 +23,9 @@ def to_il(operand:Operand, il:LowLevelILFunction) -> ExpressionIndex:
         case MemoryOperand(mode, base, offset):
             base_il = il.reg(ARCH_SIZE, str(base))
             if isinstance(offset, Register):
-                offset_il = il.reg(ARCH_SIZE, str(offset))
+                offset_il = il.shift_left(ARCH_SIZE, 
+                        il.reg(ARCH_SIZE, str(offset)),
+                        il.const(ARCH_SIZE, 2))
             else:
                 offset_il = il.const(ARCH_SIZE, offset)
             match mode:
@@ -31,11 +33,16 @@ def to_il(operand:Operand, il:LowLevelILFunction) -> ExpressionIndex:
                     offset_il = il.neg_expr(ARCH_SIZE, offset_il)
                 case AddressingMode.PREDECREMENT:
                     il.append(il.set_reg(ARCH_SIZE, str(base), 
-                            il.sub(ARCH_SIZE, base_il, il.const(ARCH_SIZE, DW_SIZE))))
+                            il.sub(ARCH_SIZE, base_il, offset_il)))
                 case AddressingMode.PREINCREMENT:
                     il.append(il.set_reg(ARCH_SIZE, str(base), 
-                            il.add(ARCH_SIZE, base_il, il.const(ARCH_SIZE, DW_SIZE))))
-            return il.add(ARCH_SIZE, base_il, offset_il)
+                            il.add(ARCH_SIZE, base_il, offset_il)))
+            match mode:
+                case (AddressingMode.POS_OFFSET 
+                        | AddressingMode.NEG_OFFSET):
+                    return il.add(ARCH_SIZE, base_il, offset_il)
+                case _:
+                    return base_il
         case _:
             raise NotImplementedError(f'lifting of {type(operand)}')
 
@@ -43,13 +50,19 @@ def post_instr(operand:Operand, il:LowLevelILFunction):
     match operand:
         case MemoryOperand(mode, base, offset):
             base_il = il.reg(ARCH_SIZE, str(base))
+            if isinstance(offset, Register):
+                offset_il = il.shift_left(ARCH_SIZE, 
+                        il.reg(ARCH_SIZE, str(offset)),
+                        il.const(ARCH_SIZE, 2))
+            else:
+                offset_il = il.const(ARCH_SIZE, offset)
             match mode:
                 case AddressingMode.POSTDECREMENT:
                     il.append(il.set_reg(ARCH_SIZE, str(base), 
-                            il.sub(ARCH_SIZE, base_il, il.const(ARCH_SIZE, DW_SIZE))))
+                            il.sub(ARCH_SIZE, base_il, offset_il)))
                 case AddressingMode.POSTINCREMENT:
                     il.append(il.set_reg(ARCH_SIZE, str(base), 
-                            il.add(ARCH_SIZE, base_il, il.const(ARCH_SIZE, DW_SIZE))))
+                            il.add(ARCH_SIZE, base_il, offset_il)))
 
 
 ## Simple instruction lifting (without delays)
@@ -94,7 +107,7 @@ def lift_mvkh(instr: Instruction, il: LowLevelILFunction):
     assert isinstance(instr.operands[0], ImmediateOperand)
     imm = instr.operands[0].value
     reg = str(instr.operands[1])
-    il.append(il.set_reg(ARCH_SIZE, reg+"H", il.const(HW_SIZE, imm)))
+    il.append(il.set_reg(HW_SIZE, reg+"H", il.const(HW_SIZE, imm)))
 
 def lift_nop(instr: Instruction, il: LowLevelILFunction):
     il.append(il.nop())
