@@ -14,6 +14,11 @@ from .disassembler.types import Instruction, Operand, ImmediateOperand, \
 
 ## Helpers
 
+class LiftingContext:
+    def __init__(self) -> None:
+        self.max_temp_reg:int = 0
+        self.free_temp_regs:List[int] = list()
+
 def to_il(operand:Operand, il:LowLevelILFunction) -> ExpressionIndex:
     match operand:
         case ImmediateOperand(value):
@@ -23,7 +28,9 @@ def to_il(operand:Operand, il:LowLevelILFunction) -> ExpressionIndex:
         case MemoryOperand(mode, base, offset):
             base_il = il.reg(ARCH_SIZE, str(base))
             if isinstance(offset, Register):
-                offset_il = il.reg(ARCH_SIZE, str(offset))
+                offset_il = il.shift_left(ARCH_SIZE, 
+                        il.reg(ARCH_SIZE, str(offset)),
+                        il.const(ARCH_SIZE, 2))
             else:
                 offset_il = il.const(ARCH_SIZE, offset)
             match mode:
@@ -31,11 +38,16 @@ def to_il(operand:Operand, il:LowLevelILFunction) -> ExpressionIndex:
                     offset_il = il.neg_expr(ARCH_SIZE, offset_il)
                 case AddressingMode.PREDECREMENT:
                     il.append(il.set_reg(ARCH_SIZE, str(base), 
-                            il.sub(ARCH_SIZE, base_il, il.const(ARCH_SIZE, DW_SIZE))))
+                            il.sub(ARCH_SIZE, base_il, offset_il)))
                 case AddressingMode.PREINCREMENT:
                     il.append(il.set_reg(ARCH_SIZE, str(base), 
-                            il.add(ARCH_SIZE, base_il, il.const(ARCH_SIZE, DW_SIZE))))
-            return il.add(ARCH_SIZE, base_il, offset_il)
+                            il.add(ARCH_SIZE, base_il, offset_il)))
+            match mode:
+                case (AddressingMode.POS_OFFSET 
+                        | AddressingMode.NEG_OFFSET):
+                    return il.add(ARCH_SIZE, base_il, offset_il)
+                case _:
+                    return base_il
         case _:
             raise NotImplementedError(f'lifting of {type(operand)}')
 
@@ -43,27 +55,36 @@ def post_instr(operand:Operand, il:LowLevelILFunction):
     match operand:
         case MemoryOperand(mode, base, offset):
             base_il = il.reg(ARCH_SIZE, str(base))
+            if isinstance(offset, Register):
+                offset_il = il.shift_left(ARCH_SIZE, 
+                        il.reg(ARCH_SIZE, str(offset)),
+                        il.const(ARCH_SIZE, 2))
+            else:
+                offset_il = il.const(ARCH_SIZE, offset)
             match mode:
                 case AddressingMode.POSTDECREMENT:
                     il.append(il.set_reg(ARCH_SIZE, str(base), 
-                            il.sub(ARCH_SIZE, base_il, il.const(ARCH_SIZE, DW_SIZE))))
+                            il.sub(ARCH_SIZE, base_il, offset_il)))
                 case AddressingMode.POSTINCREMENT:
                     il.append(il.set_reg(ARCH_SIZE, str(base), 
-                            il.add(ARCH_SIZE, base_il, il.const(ARCH_SIZE, DW_SIZE))))
+                            il.add(ARCH_SIZE, base_il, offset_il)))
 
 
 ## Simple instruction lifting (without delays)
 
-def lift_add(instr:Instruction, il:LowLevelILFunction):
+def _lift_bin_op(instr:Instruction, il:LowLevelILFunction, op):
     #TODO: handle all input variants and determine sizes based on ops
     src1 = to_il(instr.operands[0], il)
     src2 = to_il(instr.operands[1], il)
     dst = str(instr.operands[2])
-    il.append(il.set_reg(ARCH_SIZE, dst, il.add(
+    il.append(il.set_reg(ARCH_SIZE, dst, op(
         ARCH_SIZE, src1, src2
     )))
 
-def lift_addk(instr:Instruction, il:LowLevelILFunction):
+def lift_add(instr:Instruction, il:LowLevelILFunction, ctx:LiftingContext):
+    _lift_bin_op(instr, il, il.add)
+
+def lift_addk(instr:Instruction, il:LowLevelILFunction, ctx:LiftingContext):
     assert isinstance(instr.operands[0], ImmediateOperand)
     imm = instr.operands[0].value
     reg = str(instr.operands[1])
@@ -71,53 +92,52 @@ def lift_addk(instr:Instruction, il:LowLevelILFunction):
         ARCH_SIZE, il.const(HW_SIZE, imm), il.reg(ARCH_SIZE, reg)
     )))
 
-def lift_cmpeq(instr:Instruction, il:LowLevelILFunction):
+def lift_cmpeq(instr:Instruction, il:LowLevelILFunction, ctx:LiftingContext):
     src1 = to_il(instr.operands[0], il)
     src2 = to_il(instr.operands[1], il)
     il.append(il.set_reg(ARCH_SIZE, str(instr.operands[2]), 
             il.compare_equal(ARCH_SIZE, src1, src2)))
     
-def lift_cmplt(instr:Instruction, il:LowLevelILFunction):
+def lift_cmplt(instr:Instruction, il:LowLevelILFunction, ctx:LiftingContext):
     src1 = to_il(instr.operands[0], il)
     src2 = to_il(instr.operands[1], il)
     il.append(il.set_reg(ARCH_SIZE, str(instr.operands[2]), 
             il.compare_signed_less_than(ARCH_SIZE, src1, src2)))
 
-def lift_mvk(instr: Instruction, il: LowLevelILFunction):
+def lift_mvk(instr: Instruction, il: LowLevelILFunction, ctx:LiftingContext):
     assert isinstance(instr.operands[0], ImmediateOperand)
     imm = instr.operands[0].value
     reg = str(instr.operands[1])
     value = il.sign_extend(ARCH_SIZE, il.const(HW_SIZE, imm))
     il.append(il.set_reg(ARCH_SIZE, reg, value))
 
-def lift_mvkh(instr: Instruction, il: LowLevelILFunction):
+def lift_mvkh(instr: Instruction, il: LowLevelILFunction, ctx:LiftingContext):
     assert isinstance(instr.operands[0], ImmediateOperand)
     imm = instr.operands[0].value
     reg = str(instr.operands[1])
-    il.append(il.set_reg(ARCH_SIZE, reg+"H", il.const(HW_SIZE, imm)))
+    il.append(il.set_reg(HW_SIZE, reg+"H", il.const(HW_SIZE, imm)))
 
-def lift_nop(instr: Instruction, il: LowLevelILFunction):
+def lift_nop(instr: Instruction, il: LowLevelILFunction, ctx:LiftingContext):
     il.append(il.nop())
 
+def lift_sub(instr: Instruction, il: LowLevelILFunction, ctx:LiftingContext):
+    _lift_bin_op(instr, il, il.sub)
 
 ## Pseudo-instruction lifting
 
-def lift_mv(instr: Instruction, il: LowLevelILFunction):
+def lift_mv(instr: Instruction, il: LowLevelILFunction, ctx:LiftingContext):
     il.append(il.set_reg(ARCH_SIZE, str(instr.operands[1]),
             il.reg(ARCH_SIZE, str(instr.operands[0]))))
 
 ## Temporary IL registers
-max_temp_reg = 0
-free_temp_regs:List[int] = list()
 
-def alloc_temp() -> int:
-    global max_temp_reg
-    if len(free_temp_regs) == 0:
-        reg = max_temp_reg
-        max_temp_reg += 1
+def alloc_temp(ctx:LiftingContext) -> int:
+    if len(ctx.free_temp_regs) == 0:
+        reg = ctx.max_temp_reg
+        ctx.max_temp_reg += 1
         return reg
     else:
-        return free_temp_regs.pop()
+        return ctx.free_temp_regs.pop()
 
 def store_temp(reg_id:int, value, il):
     tmp = LLIL_TEMP(reg_id)
@@ -127,15 +147,15 @@ def get_temp(reg_id, il):
     tmp = LLIL_TEMP(reg_id)
     return il.reg(ARCH_SIZE, tmp)
 
-def free_temp(tmp):
-    free_temp_regs.append(LLIL_GET_TEMP_REG_INDEX(tmp))
+def free_temp(ctx:LiftingContext, tmp):
+    ctx.free_temp_regs.append(LLIL_GET_TEMP_REG_INDEX(tmp))
 
 
 ## Delayed instruction lifting
 
 
-def lift_branch(instr:Instruction, il:LowLevelILFunction):
-    target = alloc_temp()
+def lift_branch(instr:Instruction, il:LowLevelILFunction, ctx:LiftingContext):
+    target = alloc_temp(ctx)
     store_temp(target, il.reg(ARCH_SIZE, str(instr.operands[0])), il)
 
     def branch(il:LowLevelILFunction):
@@ -145,11 +165,11 @@ def lift_branch(instr:Instruction, il:LowLevelILFunction):
             il.append(il.ret(addr))
         else:
             il.append(il.call(addr))
-        free_temp(target)
+        free_temp(ctx, target)
     return ((5, branch),)
 
-def lift_ldb(instr:Instruction, il:LowLevelILFunction):
-    src = alloc_temp()
+def lift_ldb(instr:Instruction, il:LowLevelILFunction, ctx:LiftingContext):
+    src = alloc_temp(ctx)
     store_temp(src, to_il(instr.operands[0], il), il)
     post_instr(instr.operands[0], il)
 
@@ -157,11 +177,11 @@ def lift_ldb(instr:Instruction, il:LowLevelILFunction):
         il.set_current_address(instr.address)
         value = il.load(1, get_temp(src, il))
         il.append(il.set_reg(ARCH_SIZE, str(instr.operands[1]), value))
-        free_temp(src)
+        free_temp(ctx, src)
     return ((4, load),)
 
-def lift_ldw(instr:Instruction, il:LowLevelILFunction):
-    src = alloc_temp()
+def lift_ldw(instr:Instruction, il:LowLevelILFunction, ctx:LiftingContext):
+    src = alloc_temp(ctx)
     store_temp(src, to_il(instr.operands[0], il), il)
     post_instr(instr.operands[0], il)
 
@@ -169,49 +189,49 @@ def lift_ldw(instr:Instruction, il:LowLevelILFunction):
         il.set_current_address(instr.address)
         value = il.load(ARCH_SIZE, get_temp(src, il))
         il.append(il.set_reg(ARCH_SIZE, str(instr.operands[1]), value))
-        free_temp(src)
+        free_temp(ctx, src)
     return ((4, load),)
 
-def lift_mpyi(instr:Instruction, il:LowLevelILFunction):
-    src1 = alloc_temp()
+def lift_mpyi(instr:Instruction, il:LowLevelILFunction, ctx:LiftingContext):
+    src1 = alloc_temp(ctx)
     store_temp(src1, to_il(instr.operands[0], il), il)
-    src2 = alloc_temp()
+    src2 = alloc_temp(ctx)
     store_temp(src2, to_il(instr.operands[1], il), il)
     
     def result(il):
         il.set_current_address(instr.address)
         il.append(il.set_reg(ARCH_SIZE, str(instr.operands[2]), 
             il.mult(ARCH_SIZE, get_temp(src1, il), get_temp(src2, il))))
-        free_temp(src1)
-        free_temp(src2)
+        free_temp(ctx, src1)
+        free_temp(ctx, src2)
     return ((8, result),)
 
-def lift_stb(instr:Instruction, il:LowLevelILFunction):
-    value = alloc_temp()
+def lift_stb(instr:Instruction, il:LowLevelILFunction, ctx:LiftingContext):
+    value = alloc_temp(ctx)
     store_temp(value, to_il(instr.operands[0], il), il)
-    dest = alloc_temp()
+    dest = alloc_temp(ctx)
     store_temp(dest, to_il(instr.operands[1], il), il)
     post_instr(instr.operands[1], il)
     
     def store(il:LowLevelILFunction):
         il.set_current_address(instr.address)
         il.append(il.store(1, get_temp(dest, il), get_temp(value, il)))
-        free_temp(value)
-        free_temp(dest)
+        free_temp(ctx, value)
+        free_temp(ctx, dest)
     return ((4, store),)
 
-def lift_stw(instr:Instruction, il:LowLevelILFunction):
-    value = alloc_temp()
+def lift_stw(instr:Instruction, il:LowLevelILFunction, ctx:LiftingContext):
+    value = alloc_temp(ctx)
     store_temp(value, to_il(instr.operands[0], il), il)
-    dest = alloc_temp()
+    dest = alloc_temp(ctx)
     store_temp(dest, to_il(instr.operands[1], il), il)
     post_instr(instr.operands[1], il)
     
     def store(il:LowLevelILFunction):
         il.set_current_address(instr.address)
         il.append(il.store(ARCH_SIZE, get_temp(dest, il), get_temp(value, il)))
-        free_temp(value)
-        free_temp(dest)
+        free_temp(ctx, value)
+        free_temp(ctx, dest)
     return ((4, store),)
 
 
@@ -231,6 +251,7 @@ HANDLERS_BY_MNEMONIC = {
     'nop': lift_nop,
     'stb': lift_stb,
     'stw': lift_stw,
+    'sub': lift_sub,
 
     # Pseudo-instruction
     'mv': lift_mv
@@ -256,23 +277,25 @@ def get_delay_consumption(instr:Instruction):
     return delay_slots
 
 
-def lift_simple(instr:Instruction, il:LowLevelILFunction):
+def lift_simple(instr:Instruction, il:LowLevelILFunction, ctx:LiftingContext):
     if instr.opcode not in HANDLERS_BY_MNEMONIC:
         il.append(il.unimplemented())
     else:
-        HANDLERS_BY_MNEMONIC[instr.opcode](instr, il)
+        HANDLERS_BY_MNEMONIC[instr.opcode](instr, il, ctx)
     return ARCH_SIZE
 
 def lift_simple_packet(packet:List[Instruction], il:LowLevelILFunction):
+    ctx = LiftingContext()
     lifted_bytes = 0
     for instr in packet:
         if instr is None: break # could not disassemble, do not lift
         il.set_current_address(instr.address)
-        lifted_bytes += lift_simple(instr, il)
+        lifted_bytes += lift_simple(instr, il, ctx)
     return lifted_bytes
 
 def lift_delayed_packet(packet:List[Instruction], disasm:Disassembler, 
         stream, il:LowLevelILFunction):
+    ctx = LiftingContext()
     lifted_bytes = 0
     delay_slots = list()
     while True:
@@ -285,7 +308,7 @@ def lift_delayed_packet(packet:List[Instruction], disasm:Disassembler,
                 new_delay = INSTRUCTION_DELAY[instr.opcode]
                 while len(delay_slots) < new_delay+1:
                     delay_slots.append(list())
-                for delay, callback in HANDLERS_BY_MNEMONIC[instr.opcode](instr, il):
+                for delay, callback in HANDLERS_BY_MNEMONIC[instr.opcode](instr, il, ctx):
                     if instr.opcode == 'b': 
                         # branching is always last action in execution packet
                         delay_slots[delay].append(callback)
@@ -293,7 +316,7 @@ def lift_delayed_packet(packet:List[Instruction], disasm:Disassembler,
                         delay_slots[delay].insert(0, callback)
                 lifted_bytes += ARCH_SIZE
             else:
-                lifted_bytes += lift_simple(instr, il)
+                lifted_bytes += lift_simple(instr, il, ctx)
         consumed_slots = max([get_delay_consumption(instr) for instr in packet])
         for _ in range(consumed_slots):
             if len(delay_slots) == 0: break
@@ -304,7 +327,9 @@ def lift_delayed_packet(packet:List[Instruction], disasm:Disassembler,
         if len(delay_slots) == 0: break
         packet = get_execution_packet(disasm, stream)
         if len(packet) == 0:
-            log_warn('Lifting of delayed instruction interrupted by empty stream')
+            for slot in delay_slots:
+                for callback in slot:
+                    callback(il)
             break
     return lifted_bytes
 
