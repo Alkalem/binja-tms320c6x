@@ -321,7 +321,9 @@ def lift_delayed_packet(packet:List[Instruction], disasm:Disassembler,
         if len(delay_slots) == 0: break
         packet = get_execution_packet(disasm, stream)
         if len(packet) == 0:
-            log_warn('Lifting of delayed instruction interrupted by empty stream')
+            for slot in delay_slots:
+                for callback in slot:
+                    callback(il)
             break
     return lifted_bytes
 
