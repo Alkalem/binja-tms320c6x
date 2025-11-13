@@ -72,14 +72,17 @@ def post_instr(operand:Operand, il:LowLevelILFunction):
 
 ## Simple instruction lifting (without delays)
 
-def lift_add(instr:Instruction, il:LowLevelILFunction, ctx:LiftingContext):
+def _lift_bin_op(instr:Instruction, il:LowLevelILFunction, op):
     #TODO: handle all input variants and determine sizes based on ops
     src1 = to_il(instr.operands[0], il)
     src2 = to_il(instr.operands[1], il)
     dst = str(instr.operands[2])
-    il.append(il.set_reg(ARCH_SIZE, dst, il.add(
+    il.append(il.set_reg(ARCH_SIZE, dst, op(
         ARCH_SIZE, src1, src2
     )))
+
+def lift_add(instr:Instruction, il:LowLevelILFunction, ctx:LiftingContext):
+    _lift_bin_op(instr, il, il.add)
 
 def lift_addk(instr:Instruction, il:LowLevelILFunction, ctx:LiftingContext):
     assert isinstance(instr.operands[0], ImmediateOperand)
@@ -117,6 +120,8 @@ def lift_mvkh(instr: Instruction, il: LowLevelILFunction, ctx:LiftingContext):
 def lift_nop(instr: Instruction, il: LowLevelILFunction, ctx:LiftingContext):
     il.append(il.nop())
 
+def lift_sub(instr: Instruction, il: LowLevelILFunction, ctx:LiftingContext):
+    _lift_bin_op(instr, il, il.sub)
 
 ## Pseudo-instruction lifting
 
@@ -246,6 +251,7 @@ HANDLERS_BY_MNEMONIC = {
     'nop': lift_nop,
     'stb': lift_stb,
     'stw': lift_stw,
+    'sub': lift_sub,
 
     # Pseudo-instruction
     'mv': lift_mv
