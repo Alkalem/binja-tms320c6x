@@ -9,7 +9,7 @@ from .constants import ARCH_SIZE, LOAD_BASE
 from .disassembler import Disassembler as C6xDisassembler
 from .disassembler.types import Operand, Instruction, Register, \
         ImmediateOperand, RegisterOperand, ControlRegister, \
-        RegisterPairOperand, MemoryOperand
+        RegisterPairOperand, MemoryOperand, ControlRegisterOperand
 
 
 class Disassembler:
@@ -34,48 +34,32 @@ class Disassembler:
         if instr is None: return result
         
         if instr.opcode == 'b':
-            # Work around: calculate instruction delay by look-ahead
-            # (see binaryninja-api issue 6868)
-            branch_delay = 5
-            instruction_delay = 0
-            if instr.parallel:
-                # next instruction is part of current fetch packet 
-                branch_delay += 1
-            while branch_delay > 0:
-                instruction_delay += 1
-                delay_instr = self.decode(
-                        data[4*instruction_delay:],
-                        addr + 4*instruction_delay
-                    )
-                # log_warn(f"{delay_instr.mnemonic}, {instruction_delay}")
-                if delay_instr is None:
-                    branch_delay -= 1 # assume not parallel
-                elif delay_instr.parallel: 
-                    continue
-                elif delay_instr.opcode == 'nop':
-                    assert isinstance(delay_instr.operands[0], ImmediateOperand)
-                    branch_delay -= delay_instr.operands[0].value
-                else:
-                    branch_delay -= 1
-            
-            result.branch_delay = instruction_delay
-            if (isinstance(instr.operands[0], RegisterOperand)
-                    and str(instr.operands[0]) == 'B3'):
-                #TODO: this should be a calling convention
-                result.add_branch(BranchType.FunctionReturn)
-            elif instr.condition.branch:
-                if instr.condition.branch == False:
-                    result.add_branch(BranchType.FalseBranch)
-                    result.add_branch(BranchType.TrueBranch, 
-                            addr+ (instruction_delay+1)*4)
-                else:
-                    result.add_branch(BranchType.TrueBranch)
-                    result.add_branch(BranchType.FalseBranch, 
-                            addr + (instruction_delay+1)*4)
+            result.branch_delay = 5
+            target = 0
+            match instr.operands[0]:
+                case RegisterOperand(Register.B3):
+                    #TODO: this should be a calling convention
+                    branch_type = BranchType.FunctionReturn
+                case RegisterOperand(_):
+                    branch_type = BranchType.IndirectBranch
+                case (ControlRegisterOperand(ControlRegister.IRP) |
+                        ControlRegisterOperand(ControlRegister.NRP)):
+                    # Interrupt service routines end similar to functions
+                    branch_type = BranchType.FunctionReturn
+                case op:
+                    assert type(op) == ImmediateOperand, f'Unexpected branch target {op}'
+                    branch_type = BranchType.UnconditionalBranch
+                    fp_address = addr - (addr % (8*ARCH_SIZE))
+                    target = fp_address + (op.value << 2)
+            if instr.condition.branch is not None:
+                match branch_type:
+                    case BranchType.FunctionReturn:
+                        result.add_branch(branch_type, target)
+                    case _:
+                        result.add_branch(BranchType.TrueBranch, target)
+                result.add_branch(BranchType.FalseBranch)
             else:
-                #TODO: resolve destinations and fix branch type
-                result.add_branch(BranchType.CallDestination)
-                # result.add_branch(BranchType.UnresolvedBranch)
+                result.add_branch(branch_type, target)
         return result
     
 
