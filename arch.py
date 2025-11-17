@@ -7,31 +7,16 @@ from .constants import *
 from .lifting import lift_il
 
 
-class TMS320C67x(Architecture):
-    name = 'TMS320C67x'
-
+class TMS320C6xBaseArch(Architecture):
     address_size = ARCH_SIZE        # 32-bit addresses
     default_int_size = ARCH_SIZE    # 4-byte integers
     instr_alignment = ARCH_SIZE     # fixed 4 byte alignment
-    # max_instr_length = ARCH_SIZE  # maximum length
+
     # Work around: include possible branch delay instructions
     # (see binaryninja-api issue 6868)
-    max_instr_length = ARCH_SIZE * (8*(5+1)) 
+    max_instr_length = ARCH_SIZE * (8*(5+1))
 
-    regs = {
-        name: RegisterInfo(name, ARCH_SIZE)
-        for name in REGISTER_NAMES
-    } | {
-        name+'H': RegisterInfo(name, ARCH_SIZE//2, ARCH_SIZE//2)
-        for name in REGISTER_NAMES
-    } | {
-        name+'L': RegisterInfo(name, 0, ARCH_SIZE//2)
-        for name in REGISTER_NAMES
-    }
-
-    stack_pointer = 'B15'
-
-    disasm = Disassembler()
+    disasm:Disassembler
 
     def get_instruction_info(self, data, addr):
         return self.disasm.info(data, addr)
@@ -49,7 +34,23 @@ class TMS320C67x(Architecture):
     
     def get_instruction_low_level_il(self, data, addr, il):
         return lift_il(self.disasm, data, addr, il)
+
+class TMS320C67x(TMS320C6xBaseArch):
+    name = 'TMS320C67x'
+
+    regs = {
+        name: RegisterInfo(name, ARCH_SIZE)
+        for name in REGISTER_NAMES
+    } | {
+        name+'H': RegisterInfo(name, ARCH_SIZE//2, ARCH_SIZE//2)
+        for name in REGISTER_NAMES
+    }
+
+    stack_pointer = 'B15'
     
+    disasm = Disassembler()
+
+
 class C67Call(CallingConvention):
     name = 'c67call'
 
