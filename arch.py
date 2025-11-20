@@ -21,17 +21,6 @@ class TMS320C6xBaseArch(Architecture):
     def get_instruction_info(self, data, addr):
         return self.disasm.info(data, addr)
     
-    def get_instruction_text(self, data, addr):
-        instructions = self.disasm.disasm(data, addr, limit=8)
-        tokens = []
-        for i, instruction in enumerate(instructions):
-            tokens.extend(gen_tokens(instruction, i*ARCH_SIZE))
-            # separate execution packets
-            if not instruction.parallel: break 
-            # stop at fetch packet boundary
-            if ((instruction.address+ARCH_SIZE) % (8*ARCH_SIZE) == 0): break
-        return tokens, ARCH_SIZE * (i+1)
-    
     def get_instruction_low_level_il(self, data, addr, il):
         return lift_il(self.disasm, data, addr, il)
 
@@ -50,6 +39,17 @@ class TMS320C67x(TMS320C6xBaseArch):
     
     disasm = Disassembler()
 
+    def get_instruction_text(self, data, addr):
+        instructions = self.disasm.disasm(data, addr, limit=8)
+        tokens = []
+        for i, instruction in enumerate(instructions):
+            assert instruction.size == ARCH_SIZE
+            tokens.extend(gen_tokens(instruction, i*ARCH_SIZE))
+            # separate execution packets
+            if not instruction.parallel: break 
+            # stop at fetch packet boundary
+            if ((instruction.address+ARCH_SIZE) % (8*ARCH_SIZE) == 0): break
+        return tokens, ARCH_SIZE * (i+1)
 
 class C67Call(CallingConvention):
     name = 'c67call'

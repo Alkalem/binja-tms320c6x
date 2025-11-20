@@ -27,9 +27,10 @@ class Disassembler:
         return instr
     
     def info(self, data, addr):
-        instr = self.decode(data, addr)
+        instructions = self.disasm(data, addr)
+        instr = next(instructions)
         result = InstructionInfo()
-        result.length = ARCH_SIZE
+        result.length = instr.size
         if instr.is_invalid(): return result
         
         if instr.opcode == 'b':
@@ -41,15 +42,13 @@ class Disassembler:
                 # next instruction is part of current fetch packet 
                 branch_delay += 1
             while branch_delay > 0:
+                try:
+                    delay_instr = next(instructions)
+                except StopIteration:
+                    log_warn('instruction stream did not consume branch delay')
+                    break
                 instruction_delay += 1
-                delay_instr = self.decode(
-                        data[4*instruction_delay:],
-                        addr + 4*instruction_delay
-                    )
-                # log_warn(f"{delay_instr.mnemonic}, {instruction_delay}")
-                if delay_instr is None:
-                    branch_delay -= 1 # assume not parallel
-                elif delay_instr.parallel: 
+                if delay_instr.parallel: 
                     continue
                 elif delay_instr.opcode == 'nop':
                     assert isinstance(delay_instr.operands[0], ImmediateOperand)
