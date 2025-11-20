@@ -288,7 +288,9 @@ def lift_simple_packet(packet:List[Instruction], il:LowLevelILFunction):
     ctx = LiftingContext()
     lifted_bytes = 0
     for instr in packet:
-        if instr is None: break # could not disassemble, do not lift
+        if instr.is_invalid(): 
+            # could not disassemble, do not lift
+            continue 
         il.set_current_address(instr.address)
         lifted_bytes += lift_simple(instr, il, ctx)
     return lifted_bytes
@@ -301,9 +303,8 @@ def lift_delayed_packet(packet:List[Instruction], disasm:Disassembler,
     while True:
         for instr in packet:
             il.set_current_address(instr.address)
-            if instr is None:
-                log_warn('Lifting of delayed instruction interrupted by invalid instruction')
-                return lifted_bytes
+            if instr.is_invalid():
+                continue
             if instr.opcode in INSTRUCTION_DELAY:
                 new_delay = INSTRUCTION_DELAY[instr.opcode]
                 while len(delay_slots) < new_delay+1:
@@ -337,8 +338,7 @@ def lift_il(disasm:Disassembler, data:bytes, addr:int, il: LowLevelILFunction):
     instruction_stream = gen_instructions(data, addr)
     execution_packet = get_execution_packet(disasm, instruction_stream)
     
-    if any([instr.opcode in INSTRUCTION_DELAY for instr in execution_packet
-            if instr is not None]):
+    if any([instr.opcode in INSTRUCTION_DELAY for instr in execution_packet]):
         return lift_delayed_packet(execution_packet, disasm, 
                 instruction_stream, il)
 

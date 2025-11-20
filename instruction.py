@@ -18,19 +18,19 @@ class Disassembler:
     def disasm(self, data, addr, limit=-1) -> Generator[Instruction, Any, None]:
         return self.__dis.disasm(data, addr, count=limit)
 
-    def decode(self, data, addr) -> Optional[Instruction]:
+    def decode(self, data, addr) -> Instruction:
         try:
             instr = next(self.__dis.disasm(
                     data, addr, count=1))
         except StopIteration:
-            return None
+            assert False, 'Disassembler should return result'
         return instr
     
     def info(self, data, addr):
         instr = self.decode(data, addr)
         result = InstructionInfo()
         result.length = ARCH_SIZE
-        if instr is None: return result
+        if instr.is_invalid(): return result
         
         if instr.opcode == 'b':
             # Work around: calculate instruction delay by look-ahead
