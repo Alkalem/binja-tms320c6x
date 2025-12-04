@@ -185,9 +185,9 @@ def gen_tokens(instr: Instruction, offset: int):
     tokens.append(
         InstructionTextToken(
             InstructionTextTokenType.TextToken, 
-            instr.unit)
+            str(instr.unit))
     )
-    middle_length += len(instr.unit)
+    middle_length += len(str(instr.unit))
     tokens.append(
         InstructionTextToken(
             InstructionTextTokenType.TextToken, 
