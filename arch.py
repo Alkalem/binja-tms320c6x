@@ -1,8 +1,9 @@
-from binaryninja.architecture import Architecture
-from binaryninja.function import RegisterInfo
+from binaryninja.architecture import Architecture, RegisterInfo, \
+    RegisterName
 from binaryninja import CallingConvention
 
-from .instruction import Disassembler, gen_tokens, RegisterOperand
+from .disassembler.types import Register, ISA
+from .instruction import Disassembler, gen_tokens
 from .constants import *
 from .lifting import lift_il
 
@@ -46,7 +47,7 @@ class TMS320C67x(TMS320C6xBaseArch):
             assert instruction.size == ARCH_SIZE
             tokens.extend(gen_tokens(instruction, i*ARCH_SIZE))
             # separate execution packets
-            if not instruction.parallel: break 
+            if not instruction.parallel: break
             # stop at fetch packet boundary
             if ((instruction.address+ARCH_SIZE) % (8*ARCH_SIZE) == 0): break
         return tokens, ARCH_SIZE * (i+1)
@@ -70,4 +71,29 @@ class C67Call(CallingConvention):
     eligible_for_heuristics = True
     int_return_reg = 'A4'
     high_int_return_reg = 'A5'
+
+class TMS320C6x(TMS320C6xBaseArch):
+    name = 'TMS320C6x'
+
+    regs = dict()
+    for reg in Register:
+        _name = RegisterName(reg.name)
+        regs[_name] = RegisterInfo(_name, ARCH_SIZE)
+        _name = RegisterName(reg.name+'H')
+        regs[_name] = RegisterInfo(_name, ARCH_SIZE//2, ARCH_SIZE//2)
+
+    stack_pointer = 'B15'
+
+    disasm = Disassembler(isa=ISA.C674X)
+
+    def get_instruction_text(self, data, addr):
+        instructions = self.disasm.disasm(data, addr, limit=16)
+        tokens = []
+        offset = 0
+        for i, instruction in enumerate(instructions):
+            tokens.extend(gen_tokens(instruction, offset))
+            offset += instruction.size
+            # separate execution packets
+            if not instruction.parallel: break
+        return tokens, offset
 

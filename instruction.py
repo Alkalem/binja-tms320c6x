@@ -7,13 +7,13 @@ from typing import Any, Generator, Optional
 from .constants import ARCH_SIZE, LOAD_BASE
 from .disassembler import Disassembler as C6xDisassembler
 from .disassembler.types import Operand, Instruction, Register, \
-        ImmediateOperand, RegisterOperand, ControlRegister, \
-        RegisterPairOperand, MemoryOperand
+        ImmediateOperand, RegisterOperand, ControlRegisterOperand, \
+        RegisterPairOperand, MemoryOperand, ISA
 
 
 class Disassembler:
-    def __init__(self):
-        self.__dis = C6xDisassembler()
+    def __init__(self, isa:ISA=ISA.C67X):
+        self.__dis = C6xDisassembler(isa=isa)
     
     def disasm(self, data, addr, limit=-1) -> Generator[Instruction, Any, None]:
         return self.__dis.disasm(data, addr, count=limit)
@@ -92,7 +92,7 @@ def _gen_operand_tokens(operand: Operand):
                 return [InstructionTextToken(
                         InstructionTextTokenType.IntegerToken,
                         integer)]
-        case RegisterOperand(register)|ControlRegister(register):
+        case RegisterOperand(register)|ControlRegisterOperand(register):
             return [InstructionTextToken(
                     InstructionTextTokenType.RegisterToken,
                     register.name)]

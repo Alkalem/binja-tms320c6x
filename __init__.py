@@ -1,6 +1,6 @@
 import binaryninja as _bn
 
-from .arch import TMS320C67x, C67Call
+from .arch import TMS320C67x, C67Call, TMS320C6x
 
 
 TMS320C67x.register()
@@ -12,3 +12,8 @@ _bn.binaryview.BinaryViewType['ELF'].register_arch(
     0x9c60, _bn.enums.Endianness.LittleEndian, _arch
 )
 
+TMS320C6x.register()
+_arch = _bn.architecture.Architecture['TMS320C6x']
+_bn.binaryview.BinaryViewType['ELF'].register_arch(
+    140, _bn.enums.Endianness.LittleEndian, _arch
+)
