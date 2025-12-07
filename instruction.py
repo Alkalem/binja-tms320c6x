@@ -8,7 +8,7 @@ from .constants import ARCH_SIZE, LOAD_BASE
 from .disassembler import Disassembler as C6xDisassembler
 from .disassembler.types import Operand, Instruction, Register, \
         ImmediateOperand, RegisterOperand, ControlRegisterOperand, \
-        RegisterPairOperand, MemoryOperand, ISA
+        RegisterPairOperand, MemoryOperand, FuncUnitsOperand, ISA
 
 
 class Disassembler:
@@ -152,6 +152,23 @@ def _gen_operand_tokens(operand: Operand):
                     InstructionTextTokenType.EndMemoryOperandToken, 
                     "]")
             ])
+            return tokens
+        case FuncUnitsOperand(units):
+            tokens = list()
+            unit_list = sorted(units)
+            if len(unit_list) > 0:
+                tokens.append(InstructionTextToken(
+                    InstructionTextTokenType.TextToken, 
+                    str(unit_list[0])))
+                for unit in unit_list[1:]:
+                    tokens.extend([
+                        InstructionTextToken(
+                            InstructionTextTokenType.TextToken, 
+                            str(', ')),
+                        InstructionTextToken(
+                            InstructionTextTokenType.TextToken, 
+                            str(unit))
+                    ])
             return tokens
         case _:
             raise NotImplementedError(f'operand type {type(operand)}')
