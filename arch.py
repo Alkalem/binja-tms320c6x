@@ -2,7 +2,7 @@ from binaryninja.architecture import Architecture, RegisterInfo, \
     RegisterName
 from binaryninja import CallingConvention
 
-from .disassembler.types import Register, ISA
+from .disassembler.types import Register, ControlRegister, ISA
 from .instruction import Disassembler, gen_tokens
 from .constants import *
 from .lifting import lift_il
@@ -26,19 +26,25 @@ class TMS320C6xBaseArch(Architecture):
         return lift_il(self.disasm, data, addr, il)
 
 class TMS320C67x(TMS320C6xBaseArch):
-    name = 'TMS320C67x'
+    name = 'TMS320C67x+'
 
-    regs = {
-        name: RegisterInfo(name, ARCH_SIZE)
-        for name in REGISTER_NAMES
-    } | {
-        name+'H': RegisterInfo(name, ARCH_SIZE//2, ARCH_SIZE//2)
-        for name in REGISTER_NAMES
-    }
+    regs = dict()
+    system_regs = list()
+    for reg in Register:
+        if reg & 16: continue # skip high registers
+        _name = RegisterName(reg.name)
+        regs[_name] = RegisterInfo(_name, ARCH_SIZE)
+        _name = RegisterName(reg.name+'H')
+        regs[_name] = RegisterInfo(_name, ARCH_SIZE//2, ARCH_SIZE//2)
+    for reg in ControlRegister:
+        if reg.isa not in ISA.C67XP: continue
+        _name = RegisterName(reg.name)
+        regs[_name] = RegisterInfo(_name, ARCH_SIZE)
+        system_regs.append(_name)
 
     stack_pointer = 'B15'
     
-    disasm = Disassembler()
+    disasm = Disassembler(isa=ISA.C67XP)
 
     def get_instruction_text(self, data, addr):
         instructions = self.disasm.disasm(data, addr, limit=8)
@@ -74,13 +80,19 @@ class C67Call(CallingConvention):
 
 class TMS320C6x(TMS320C6xBaseArch):
     name = 'TMS320C6x'
+    instr_alignment = HW_SIZE     # compact instructions
 
     regs = dict()
+    system_regs = list()
     for reg in Register:
         _name = RegisterName(reg.name)
         regs[_name] = RegisterInfo(_name, ARCH_SIZE)
         _name = RegisterName(reg.name+'H')
         regs[_name] = RegisterInfo(_name, ARCH_SIZE//2, ARCH_SIZE//2)
+    for reg in ControlRegister:
+        _name = RegisterName(reg.name)
+        regs[_name] = RegisterInfo(_name, ARCH_SIZE)
+        system_regs.append(_name)
 
     stack_pointer = 'B15'
 
