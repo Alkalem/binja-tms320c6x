@@ -3,6 +3,7 @@ from binaryninja.enums import InstructionTextTokenType, BranchType
 from binaryninja.log import log_warn
 
 from typing import Any, Generator, Optional
+from dataclasses import dataclass
 
 from .constants import ARCH_SIZE, LOAD_BASE
 from .disassembler import Disassembler as C6xDisassembler
@@ -10,6 +11,12 @@ from .disassembler.types import Operand, Instruction, Register, \
         ImmediateOperand, RegisterOperand, ControlRegisterOperand, \
         RegisterPairOperand, MemoryOperand, FuncUnitsOperand, ISA
 
+@dataclass
+class _BranchInfo:
+    delay:int
+    type:BranchType
+    target:int
+    conditional:bool
 
 class Disassembler:
     def __init__(self, isa:ISA=ISA.C67X):
@@ -31,50 +38,64 @@ class Disassembler:
         instr = next(instructions)
         result = InstructionInfo()
         result.length = instr.size
-        if instr.is_invalid(): return result
+        if instr.is_invalid() or instr.is_fp_header(): return result
         
-        if instr.opcode == 'b':
+        branch_info = self.__get_branch(instr)
+        if branch_info is not None:
             # Work around: calculate instruction delay by look-ahead
             # (see binaryninja-api issue 6868)
-            branch_delay = 5
+            branch_delay = branch_info.delay
             instruction_delay = 0
-            if instr.parallel:
-                # next instruction is part of current fetch packet 
-                branch_delay += 1
-            while branch_delay > 0:
+            false_target = addr + instr.size
+            current_instr = instr
+            while branch_delay > 0 or current_instr.parallel:
                 try:
-                    delay_instr = next(instructions)
+                    current_instr = next(instructions)
                 except StopIteration:
                     log_warn('instruction stream did not consume branch delay')
                     break
                 instruction_delay += 1
-                if delay_instr.parallel: 
-                    continue
-                elif delay_instr.opcode == 'nop':
-                    assert isinstance(delay_instr.operands[0], ImmediateOperand)
-                    branch_delay -= delay_instr.operands[0].value
+                false_target += current_instr.size
+                if current_instr.is_fp_header(): continue
+                if current_instr.parallel: 
+                    branch_delay += 1
+                if current_instr.opcode == 'nop':
+                    assert isinstance(current_instr.operands[0], ImmediateOperand)
+                    branch_delay -= current_instr.operands[0].value
                 else:
                     branch_delay -= 1
             
             result.branch_delay = instruction_delay
-            if (isinstance(instr.operands[0], RegisterOperand)
-                    and str(instr.operands[0]) == 'B3'):
-                #TODO: this should be a calling convention
-                result.add_branch(BranchType.FunctionReturn)
-            elif instr.condition.branch:
-                if instr.condition.branch == False:
-                    result.add_branch(BranchType.FalseBranch)
-                    result.add_branch(BranchType.TrueBranch, 
-                            addr + (instruction_delay+1)*4)
-                else:
-                    result.add_branch(BranchType.TrueBranch)
-                    result.add_branch(BranchType.FalseBranch, 
-                            addr + (instruction_delay+1)*4)
+            if instr.condition.branch and branch_info.conditional:
+                    result.add_branch(BranchType.TrueBranch, branch_info.target)
+                    result.add_branch(BranchType.FalseBranch, false_target)
             else:
-                #TODO: resolve destinations and fix branch type
-                result.add_branch(BranchType.CallDestination)
-                # result.add_branch(BranchType.UnresolvedBranch)
+                result.add_branch(branch_info.type, branch_info.target)
         return result
+    
+    def __get_branch(self, instr:Instruction) -> Optional[_BranchInfo]:
+        match instr.opcode:
+            case 'spkernel'|'spkernelr':
+                return _BranchInfo(0, BranchType.UserDefinedBranch, 0, False)
+            case 'swe'|'swenr':
+                return _BranchInfo(0, BranchType.ExceptionBranch, 0, False)
+            case 'b'|'bpos'|'bdec':
+                delay, conditional = 5, True
+            case 'bnop':
+                assert isinstance(instr.operands[1], ImmediateOperand)
+                delay = max(0, 5-instr.operands[1].value)
+                conditional = True
+            case'callp':
+                delay, conditional = 0, False
+            case _: return
+
+        match instr.operands[0]:
+            case ImmediateOperand(target):
+                return _BranchInfo(delay, BranchType.UnconditionalBranch,
+                        target, conditional)
+            case RegisterOperand(_)|ControlRegisterOperand(_):
+                return _BranchInfo(delay, BranchType.IndirectBranch, 
+                        0, conditional)
     
 
 def _gen_operand_tokens(operand: Operand):

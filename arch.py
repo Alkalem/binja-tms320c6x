@@ -80,7 +80,7 @@ class C67Call(CallingConvention):
 
 class TMS320C6x(TMS320C6xBaseArch):
     name = 'TMS320C6x'
-    instr_alignment = HW_SIZE     # compact instructions
+    # instr_alignment = HW_SIZE     # compact instructions
 
     regs = dict()
     system_regs = list()
