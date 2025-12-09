@@ -30,7 +30,8 @@ class Disassembler:
             instr = next(self.__dis.disasm(
                     data, addr, count=1))
         except StopIteration:
-            assert False, 'Disassembler should return result'
+            # assert False, f'Disassembler should return result (for {len(data)} @{addr:08x})'
+            return Instruction.invalid(addr, 4, False, None)
         return instr
     
     def info(self, data, addr):
