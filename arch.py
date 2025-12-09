@@ -49,11 +49,13 @@ class TMS320C67x(TMS320C6xBaseArch):
     def get_instruction_text(self, data, addr):
         instructions = self.disasm.disasm(data, addr, limit=8)
         tokens = []
+        parallel = False
         for i, instruction in enumerate(instructions):
             assert instruction.size == ARCH_SIZE
-            tokens.extend(gen_tokens(instruction, i*ARCH_SIZE))
+            tokens.extend(gen_tokens(instruction, i*ARCH_SIZE, parallel))
             # separate execution packets
-            if not instruction.parallel: break
+            parallel = instruction.parallel
+            if not parallel: break
             # stop at fetch packet boundary
             if ((instruction.address+ARCH_SIZE) % (8*ARCH_SIZE) == 0): break
         return tokens, ARCH_SIZE * (i+1)
@@ -99,13 +101,24 @@ class TMS320C6x(TMS320C6xBaseArch):
     disasm = Disassembler(isa=ISA.C674X)
 
     def get_instruction_text(self, data, addr):
-        instructions = self.disasm.disasm(data, addr, limit=16)
+        instructions = self.disasm.disasm(data, addr)
         tokens = []
         offset = 0
-        for i, instruction in enumerate(instructions):
-            tokens.extend(gen_tokens(instruction, offset))
+        parallel = False
+        sploop = False
+        for instruction in instructions:
+            tokens.extend(gen_tokens(instruction, offset, 
+                    parallel and not instruction.is_fp_header()))
             offset += instruction.size
-            # separate execution packets
-            if not instruction.parallel: break
+            if 'sploop' in instruction.opcode:
+                sploop = True
+            elif 'spkernel' in instruction.opcode:
+                sploop = False
+            # separate execution packets, unless in sploop body
+            if (not instruction.parallel 
+                    and not instruction.is_fp_header()
+                    and not sploop): break
+            if not instruction.is_fp_header():
+                parallel = instruction.parallel
         return tokens, offset
 

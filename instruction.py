@@ -195,9 +195,22 @@ def _gen_operand_tokens(operand: Operand):
         case _:
             raise NotImplementedError(f'operand type {type(operand)}')
 
-def gen_tokens(instr: Instruction, offset: int):
+def gen_tokens(instr: Instruction, offset: int, parallel:bool):
     tokens = list()
-    if instr.condition.branch is not None and instr.condition.register:
+    if parallel:
+        tokens.append(
+            InstructionTextToken(
+                InstructionTextTokenType.TextToken, 
+                "|| ")
+        )
+    else:
+        tokens.append(
+            InstructionTextToken(
+                InstructionTextTokenType.TextToken, 
+                "   ")
+        )
+    if (instr.condition.branch is not None 
+        and instr.condition.register is not None):
         tokens.extend([
             InstructionTextToken(
                 InstructionTextTokenType.TextToken, 
@@ -209,10 +222,10 @@ def gen_tokens(instr: Instruction, offset: int):
             InstructionTextToken(
                 InstructionTextTokenType.TextToken, "]"),
         ])
-    align = 6 if offset else 9
     tokens.append(
         InstructionTextToken(
-            InstructionTextTokenType.TextToken, ' ' * (align-len(str(instr.condition)))),   
+            InstructionTextTokenType.TextToken, 
+            ' ' * (6 -len(str(instr.condition))))
     )
 
     tokens.append(
@@ -247,12 +260,4 @@ def gen_tokens(instr: Instruction, offset: int):
             InstructionTextToken(
                 InstructionTextTokenType.NewLineToken, "", 
                 offset))
-    if instr.parallel:
-        tokens.append(
-            InstructionTextToken(
-                InstructionTextTokenType.TextToken, 
-                "|| ")
-        )
-
-
     return tokens
