@@ -1,66 +1,79 @@
-from binaryninja.function import InstructionTextToken, InstructionInfo
+from binaryninja.architecture import InstructionTextToken, InstructionInfo
 from binaryninja.enums import InstructionTextTokenType, BranchType
-from binaryninja import log_warn
+from binaryninja.log import log_warn
 
+from typing import Any, Generator, Optional
 from dataclasses import dataclass
-from typing import Optional, List, Any, Generator
 
 from .constants import ARCH_SIZE, LOAD_BASE
 from .disassembler import Disassembler as C6xDisassembler
 from .disassembler.types import Operand, Instruction, Register, \
-        ImmediateOperand, RegisterOperand, ControlRegister, \
-        RegisterPairOperand, MemoryOperand, ControlRegisterOperand
+        ImmediateOperand, RegisterOperand, ControlRegisterOperand, \
+        RegisterPairOperand, MemoryOperand, FuncUnitsOperand, ISA
 
+@dataclass
+class _BranchInfo:
+    delay:int
+    type:BranchType
+    target:int
+    conditional:bool
 
 class Disassembler:
-    def __init__(self):
-        self.__dis = C6xDisassembler()
+    def __init__(self, isa:ISA=ISA.C67X):
+        self.__dis = C6xDisassembler(isa=isa)
     
-    def disasm(self, data, addr) -> Generator[Instruction, Any, None]:
-        return self.__dis.disasm(data, addr)
+    def disasm(self, data, addr, limit=-1) -> Generator[Instruction, Any, None]:
+        return self.__dis.disasm(data, addr, count=limit)
 
-    def decode(self, data, addr) -> Optional[Instruction]:
+    def decode(self, data, addr) -> Instruction:
         try:
             instr = next(self.__dis.disasm(
                     data, addr, count=1))
         except StopIteration:
-            return None
+            # assert False, f'Disassembler should return result (for {len(data)} @{addr:08x})'
+            return Instruction.invalid(addr, 4, False, None)
         return instr
     
     def info(self, data, addr):
-        instr = self.decode(data, addr)
+        instructions = self.disasm(data, addr)
+        instr = next(instructions)
         result = InstructionInfo()
-        result.length = ARCH_SIZE
-        if instr is None: return result
+        result.length = instr.size
+        if instr.is_invalid() or instr.is_fp_header(): return result
         
-        if instr.opcode == 'b':
-            result.branch_delay = 5
-            target = 0
-            match instr.operands[0]:
-                case RegisterOperand(Register.B3):
-                    #TODO: this should be a calling convention
-                    branch_type = BranchType.FunctionReturn
-                case RegisterOperand(_):
-                    branch_type = BranchType.IndirectBranch
-                case (ControlRegisterOperand(ControlRegister.IRP) |
-                        ControlRegisterOperand(ControlRegister.NRP)):
-                    # Interrupt service routines end similar to functions
-                    branch_type = BranchType.FunctionReturn
-                case op:
-                    assert type(op) == ImmediateOperand, f'Unexpected branch target {op}'
-                    branch_type = BranchType.UnconditionalBranch
-                    fp_address = addr - (addr % (8*ARCH_SIZE))
-                    target = fp_address + (op.value << 2)
-            if instr.condition.branch is not None:
-                match branch_type:
-                    case BranchType.FunctionReturn:
-                        result.add_branch(branch_type, target)
-                    case _:
-                        result.add_branch(BranchType.TrueBranch, target)
-                result.add_branch(BranchType.FalseBranch)
+        branch_info = self.__get_branch(instr)
+        if branch_info is not None:
+            result.branch_delay = branch_info.delay
+            if instr.condition.branch and branch_info.conditional:
+                    result.add_branch(BranchType.TrueBranch, branch_info.target)
+                    result.add_branch(BranchType.FalseBranch)
             else:
-                result.add_branch(branch_type, target)
+                result.add_branch(branch_info.type, branch_info.target)
         return result
+    
+    def __get_branch(self, instr:Instruction) -> Optional[_BranchInfo]:
+        match instr.opcode:
+            case 'spkernel'|'spkernelr':
+                return _BranchInfo(0, BranchType.UserDefinedBranch, 0, False)
+            case 'swe'|'swenr':
+                return _BranchInfo(0, BranchType.ExceptionBranch, 0, False)
+            case 'b'|'bpos'|'bdec':
+                delay, conditional = 5, True
+            case 'bnop':
+                assert isinstance(instr.operands[1], ImmediateOperand)
+                delay = max(0, 5-instr.operands[1].value)
+                conditional = True
+            case'callp':
+                delay, conditional = 0, False
+            case _: return
+
+        match instr.operands[0]:
+            case ImmediateOperand(target):
+                return _BranchInfo(delay, BranchType.UnconditionalBranch,
+                        target, conditional)
+            case RegisterOperand(_)|ControlRegisterOperand(_):
+                return _BranchInfo(delay, BranchType.IndirectBranch, 
+                        0, conditional)
     
 
 def _gen_operand_tokens(operand: Operand):
@@ -78,7 +91,7 @@ def _gen_operand_tokens(operand: Operand):
                 return [InstructionTextToken(
                         InstructionTextTokenType.IntegerToken,
                         integer)]
-        case RegisterOperand(register)|ControlRegister(register):
+        case RegisterOperand(register)|ControlRegisterOperand(register):
             return [InstructionTextToken(
                     InstructionTextTokenType.RegisterToken,
                     register.name)]
@@ -139,12 +152,42 @@ def _gen_operand_tokens(operand: Operand):
                     "]")
             ])
             return tokens
+        case FuncUnitsOperand(units):
+            tokens = list()
+            unit_list = sorted(units)
+            if len(unit_list) > 0:
+                tokens.append(InstructionTextToken(
+                    InstructionTextTokenType.TextToken, 
+                    str(unit_list[0])))
+                for unit in unit_list[1:]:
+                    tokens.extend([
+                        InstructionTextToken(
+                            InstructionTextTokenType.TextToken, 
+                            str(', ')),
+                        InstructionTextToken(
+                            InstructionTextTokenType.TextToken, 
+                            str(unit))
+                    ])
+            return tokens
         case _:
             raise NotImplementedError(f'operand type {type(operand)}')
 
-def gen_tokens(instr: Instruction):
+def gen_tokens(instr: Instruction, offset: int, parallel:bool):
     tokens = list()
-    if instr.condition.branch is not None and instr.condition.register:
+    if parallel:
+        tokens.append(
+            InstructionTextToken(
+                InstructionTextTokenType.TextToken, 
+                "|| ")
+        )
+    else:
+        tokens.append(
+            InstructionTextToken(
+                InstructionTextTokenType.TextToken, 
+                "   ")
+        )
+    if (instr.condition.branch is not None 
+        and instr.condition.register is not None):
         tokens.extend([
             InstructionTextToken(
                 InstructionTextTokenType.TextToken, 
@@ -158,7 +201,8 @@ def gen_tokens(instr: Instruction):
         ])
     tokens.append(
         InstructionTextToken(
-            InstructionTextTokenType.TextToken, ' ' * (6-len(str(instr.condition)))),   
+            InstructionTextTokenType.TextToken, 
+            ' ' * (6 -len(str(instr.condition))))
     )
 
     tokens.append(
@@ -170,9 +214,9 @@ def gen_tokens(instr: Instruction):
     tokens.append(
         InstructionTextToken(
             InstructionTextTokenType.TextToken, 
-            instr.unit)
+            str(instr.unit))
     )
-    middle_length += len(instr.unit)
+    middle_length += len(str(instr.unit))
     tokens.append(
         InstructionTextToken(
             InstructionTextTokenType.TextToken, 
@@ -189,11 +233,8 @@ def gen_tokens(instr: Instruction):
             )
             tokens.extend(_gen_operand_tokens(op))
 
-    if instr.parallel:
-        tokens.append(
+    tokens.append(
             InstructionTextToken(
-                InstructionTextTokenType.TextToken, 
-                " ||")
-        )
-
+                InstructionTextTokenType.NewLineToken, "", 
+                offset))
     return tokens
