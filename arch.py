@@ -122,3 +122,7 @@ class TMS320C6x(TMS320C6xBaseArch):
                 parallel = instruction.parallel
         return tokens, offset
 
+    def get_instruction_low_level_il(self, data, addr, il):
+        instruction = self.disasm.decode(data, addr)
+        il.append(il.unimplemented())
+        return instruction.size
