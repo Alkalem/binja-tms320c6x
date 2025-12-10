@@ -90,7 +90,7 @@ def lift_addk(instr:Instruction, il:LowLevelILFunction, ctx:LiftingContext):
     imm = instr.operands[0].value
     reg = str(instr.operands[1])
     il.append(il.set_reg(ARCH_SIZE, reg, il.add(
-        ARCH_SIZE, il.const(HW_SIZE, imm), il.reg(ARCH_SIZE, reg)
+        ARCH_SIZE, il.const(ARCH_SIZE, imm), il.reg(ARCH_SIZE, reg)
     )))
 
 def lift_cmpeq(instr:Instruction, il:LowLevelILFunction, ctx:LiftingContext):
