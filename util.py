@@ -8,4 +8,14 @@ def get_delay_consumption(instr:Instruction):
     elif instr.opcode == 'idle':
         # in theory unlimited, but binja limits delay to 255
         delay_slots = 255
+    elif instr.opcode == 'addkpc':
+        assert isinstance(instr.operands[2], ImmediateOperand)
+        delay_slots = instr.operands[2].value + 1
+    elif instr.opcode == 'bnop':
+        assert isinstance(instr.operands[1], ImmediateOperand)
+        delay_slots = instr.operands[1].value + 1
+    elif (instr.opcode.startswith('ld')
+            and instr.header is not None
+            and instr.header.protected_loads):
+        delay_slots = 5 # 4 nop cycles after instruction
     return delay_slots
