@@ -1,4 +1,4 @@
-from binaryninja.architecture import BasicBlockAnalysisContext
+from binaryninja.architecture import BasicBlockAnalysisContext, InstructionBranch
 from binaryninja.basicblock import BasicBlock
 from binaryninja.enums import BranchType
 from binaryninja.function import ArchAndAddr, Function
@@ -9,6 +9,7 @@ from binaryninja.log import log_info
 from queue import SimpleQueue
 from typing import Dict, Optional, Set
 
+from .disassembler.types import ConditionType
 from .constants import ARCH_SIZE, FP_SIZE
 from .util import get_delay_consumption
 
@@ -72,7 +73,7 @@ def analyze_basic_blocks(arch, func: Function,
                         is_parallel = instr.parallel
 
                     for branch in info.branches:
-                        new_branch = (instr.condition, branch)
+                        new_branch = (info.branch_delay, instr.condition, branch)
                         new_branches.append(new_branch)
 
                     next_func_addr = view.get_next_function_start_after(location.addr)
@@ -85,11 +86,11 @@ def analyze_basic_blocks(arch, func: Function,
                         (location.addr + instr.size + ARCH_SIZE) % FP_SIZE == 0)
                     if (not(is_parallel or header_next) or ends_block): break
                 block.add_instruction_data(execution_packet)
-                #TODO: handle dual jumps
                 if len(new_branches):
-                    while len(pending_branches) < info.branch_delay:
-                        pending_branches.append(list())
-                    pending_branches.append(new_branches)
+                    for delay, condition, branch in new_branches:
+                        while len(pending_branches) <= delay:
+                            pending_branches.append(list())
+                        pending_branches[delay].append((condition, branch))
 
                 #TODO: handle branches
                 def handle_branch(branch):
@@ -108,6 +109,7 @@ def analyze_basic_blocks(arch, func: Function,
                 for _ in range(delay_consumption):
                     if len(pending_branches):
                         branches = pending_branches.pop(0)
+                        branches = __unify_branches(branches, arch)
                         for _, branch in branches:
                             handle_branch(branch)
                 delay_slot_count = max(0, delay_slot_count - delay_consumption)
@@ -128,3 +130,28 @@ def analyze_basic_blocks(arch, func: Function,
                 context.add_basic_block(block)
 
         context.finalize()
+
+def __unify_branches(branches, arch):
+    unified_branches = list()
+    require_false_branch = True
+    conditions = set()
+    for condition, branch in branches:
+        if branch.type == BranchType.TrueBranch:
+            conditions.add(condition)
+            if ConditionType(condition.value ^ 1) in conditions:
+                require_false_branch = False
+                branch = InstructionBranch(BranchType.FalseBranch, branch.target, arch)
+        elif branch.type == BranchType.FalseBranch:
+            continue
+        else:
+            require_false_branch = False
+        unified_branches.append((condition, branch))
+    if require_false_branch:
+        if len(conditions) == 1:
+            condition = ConditionType(conditions.pop().value ^ 1)
+        else:
+            # Cannot express negation in one condition
+            condition = ConditionType.RESERVED
+        false_branch = InstructionBranch(BranchType.FalseBranch, 0, arch)
+        unified_branches.append((condition, false_branch))
+    return branches

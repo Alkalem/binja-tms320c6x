@@ -16,8 +16,10 @@ def get_delay_consumption(instr:Instruction):
     elif instr.opcode == 'bnop':
         assert isinstance(instr.operands[1], ImmediateOperand)
         delay_slots = instr.operands[1].value + 1
+    elif instr.opcode == 'callp':
+        delay_slots += 5 # implied NOP cycles after instruction
     elif (instr.opcode.startswith('ld')
             and instr.header is not None
             and instr.header.protected_loads):
-        delay_slots = 5 # 4 nop cycles after instruction
+        delay_slots += 4 # NOP cycles after instruction
     return delay_slots

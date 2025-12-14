@@ -5,7 +5,7 @@ from binaryninja.log import log_warn
 from typing import Any, Generator, Optional
 from dataclasses import dataclass
 
-from .constants import ARCH_SIZE, LOAD_BASE
+from .constants import ARCH_SIZE, LOAD_BASE, BRANCH_DELAY
 from .disassembler import Disassembler as C6xDisassembler
 from .disassembler.types import Operand, Instruction, Register, \
         ImmediateOperand, RegisterOperand, ControlRegisterOperand, \
@@ -63,14 +63,13 @@ class Disassembler:
             case 'swe'|'swenr':
                 return _BranchInfo(0, BranchType.ExceptionBranch, 0, False)
             case 'b'|'bpos'|'bdec':
-                delay, conditional = 5, True
+                conditional = True
             case 'bnop':
-                assert isinstance(instr.operands[1], ImmediateOperand)
-                delay = max(0, 5-instr.operands[1].value)
                 conditional = True
             case'callp':
-                delay, conditional = 0, False
+                conditional = False
             case _: return
+        delay = BRANCH_DELAY
 
         match instr.operands[0]:
             case ImmediateOperand(target):
