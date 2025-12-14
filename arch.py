@@ -2,10 +2,11 @@ from binaryninja.architecture import Architecture, RegisterInfo, \
     RegisterName, BasicBlockAnalysisContext
 from binaryninja.callingconvention import CallingConvention
 from binaryninja.function import Function
+from binaryninja.log import log_warn
 
 from .disassembler.types import Register, ControlRegister, ISA
 from .analysis import analyze_basic_blocks
-from .instruction import Disassembler, gen_tokens
+from .instruction import Disassembler, gen_tokens, gen_newline
 from .constants import *
 from .lifting import lift_il
 
@@ -27,6 +28,10 @@ class TMS320C6xBaseArch(Architecture):
     def get_instruction_low_level_il(self, data, addr, il):
         return lift_il(self.disasm, data, addr, il)
 
+    def analyze_basic_blocks(self, func: Function, 
+            context: BasicBlockAnalysisContext) -> None:
+        analyze_basic_blocks(self, func, context)
+
 class TMS320C67x(TMS320C6xBaseArch):
     name = 'TMS320C67x+'
 
@@ -46,11 +51,7 @@ class TMS320C67x(TMS320C6xBaseArch):
 
     stack_pointer = 'B15'
     
-    disasm = Disassembler(isa=ISA.C67XP)
-    
-    def analyze_basic_blocks(self, func: Function, 
-            context: BasicBlockAnalysisContext) -> None:
-        analyze_basic_blocks(self, func, context)
+    disasm = Disassembler(isa=ISA.C67XP) 
 
     def get_instruction_text(self, data, addr):
         instructions = self.disasm.disasm(data, addr, limit=8)
@@ -107,7 +108,14 @@ class TMS320C6x(TMS320C6xBaseArch):
     disasm = Disassembler(isa=ISA.C674X)
 
     def get_instruction_text(self, data, addr):
-        instructions = self.disasm.disasm(data, addr)
+        # Workaround currently not possible because data is read from file
+        # data, limit = self.__header_workaround(data, addr)
+        try:
+            instructions = list(self.disasm.disasm(data, addr))
+        except:
+            log_warn(f'Failed @{addr:08x}, with {len(data)}, {data.hex()}')
+            return [], 0
+            # instructions = []
         tokens = []
         offset = 0
         parallel = False
@@ -126,9 +134,21 @@ class TMS320C6x(TMS320C6xBaseArch):
                     and not sploop): break
             if not instruction.is_fp_header():
                 parallel = instruction.parallel
+        else:
+            tokens.append(gen_newline(offset))
+            offset += ARCH_SIZE
         return tokens, offset
 
     def get_instruction_low_level_il(self, data, addr, il):
+        # data, _ = self.__header_workaround(data, addr)
         instruction = self.disasm.decode(data, addr)
         il.append(il.unimplemented())
         return instruction.size
+    
+    def __header_workaround(self, data, addr):
+        words = len(data)//ARCH_SIZE
+        if (len(data) != self.max_instr_length 
+                and (addr + len(data)) % FP_SIZE):
+            fill_words = 8 - ((words + (addr//ARCH_SIZE)) % 8) 
+            return data[:-ARCH_SIZE] + b'\x00'*(ARCH_SIZE*fill_words) + data[-ARCH_SIZE:], words - 1
+        return data, words

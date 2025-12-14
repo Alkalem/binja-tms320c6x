@@ -36,7 +36,12 @@ class Disassembler:
     
     def info(self, data, addr):
         instructions = self.disasm(data, addr)
-        instr = next(instructions)
+        try:
+            instr = next(instructions)
+        except:
+            log_warn(f'Got invalid data {len(data)} @{addr:08x}')
+            instr = Instruction.invalid(addr, 
+                    2 if addr & 2 else ARCH_SIZE, False, None)
         result = InstructionInfo()
         result.length = instr.size
         if instr.is_invalid() or instr.is_fp_header(): return result
@@ -238,3 +243,10 @@ def gen_tokens(instr: Instruction, offset: int, parallel:bool):
                 InstructionTextTokenType.NewLineToken, "", 
                 offset))
     return tokens
+
+def gen_newline(offset:int) -> InstructionTextToken:
+    return InstructionTextToken(
+        InstructionTextTokenType.NewLineToken,
+        "", 
+        offset
+    )
