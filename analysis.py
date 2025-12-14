@@ -55,6 +55,7 @@ def analyze_basic_blocks(arch, func: Function,
                 execution_packet = b""
                 ep_location = location
                 new_branches = list()
+                is_parallel = False
                 while True:
                     instr_bytes = view.read(location.addr, arch.max_instr_length)
                     if len(instr_bytes) == 0:
@@ -67,6 +68,8 @@ def analyze_basic_blocks(arch, func: Function,
                     execution_packet += instr_bytes[:info.length]
                     instr = arch.disasm.decode(instr_bytes, location.addr)
                     if instr.is_invalid(): break # error case
+                    if not instr.is_fp_header():
+                        is_parallel = instr.parallel
 
                     for branch in info.branches:
                         new_branch = (instr.condition, branch)
@@ -75,11 +78,12 @@ def analyze_basic_blocks(arch, func: Function,
                     next_func_addr = view.get_next_function_start_after(location.addr)
                     next_section_end = view.get_sections_at(location.addr)[0].end
                     location = ArchAndAddr(arch, location.addr + info.length)
-                    if instr.is_fp_header(): continue
                     ends_block |= next_func_addr <= location.addr
                     ends_block |= next_section_end <= location.addr
                     #TODO: fall through to next function?
-                    if (not instr.parallel or ends_block): break
+                    header_next = (instr.header is not None and 
+                        (location.addr + instr.size + ARCH_SIZE) % FP_SIZE == 0)
+                    if (not(is_parallel or header_next) or ends_block): break
                 block.add_instruction_data(execution_packet)
                 #TODO: handle dual jumps
                 if len(new_branches):

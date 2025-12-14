@@ -2,7 +2,9 @@ from .disassembler.types import Instruction, ImmediateOperand
 
 def get_delay_consumption(instr:Instruction):
     delay_slots = 1
-    if instr.opcode == 'nop':
+    if instr.is_fp_header():
+        delay_slots = 0
+    elif instr.opcode == 'nop':
         assert isinstance(instr.operands[0], ImmediateOperand)
         delay_slots = instr.operands[0].value
     elif instr.opcode == 'idle':
