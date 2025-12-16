@@ -1,5 +1,6 @@
 from binaryninja.architecture import BasicBlockAnalysisContext, InstructionBranch
 from binaryninja.basicblock import BasicBlock
+from binaryninja.binaryview import BinaryView
 from binaryninja.enums import BranchType
 from binaryninja.function import ArchAndAddr, Function
 from binaryninja.lowlevelil import LowLevelILFunction
@@ -32,6 +33,11 @@ def analyze_basic_blocks(arch, func: Function,
 
             # Get the next block to process
             location = blocks_to_process.get()
+            # if not __addr_is_executable(view, location.addr):
+            #     continue
+            # if location in seen_blocks:
+            #     continue
+            # seen_blocks.add(ArchAndAddr(arch, location.addr))
 
             # Create a new basic block
             block:BasicBlock = context.create_basic_block(location.arch, location.addr) # type: ignore
@@ -49,6 +55,34 @@ def analyze_basic_blocks(arch, func: Function,
             while True:
                 if view.analysis_is_aborted: break
                 #TODO: split blocks when processing jump into block middle
+                if location in instr_blocks:
+                    target_block = instr_blocks[location]
+                    if target_block.start == location.addr:
+                        block.add_pending_outgoing_edge(BranchType.UnconditionalBranch, location.addr, arch, block.start != location.addr)
+                        break
+                    else:
+                        split_block = context.create_basic_block(location.arch, location.addr)
+                        assert split_block is not None
+                        instr_data = target_block.get_instruction_data(location.addr)
+                        split_block.add_instruction_data(instr_data)
+                        split_block.fallthrough_to_function = target_block.fallthrough_to_function
+                        split_block.has_undetermined_outgoing_edges = target_block.has_undetermined_outgoing_edges
+                        split_block.can_exit = target_block.can_exit
+
+                        target_block.fallthrough_to_function = False
+                        target_block.has_undetermined_outgoing_edges = False
+                        target_block.can_exit = True
+                        target_block.end = location.addr
+
+                        for e in target_block.get_pending_outgoing_edges():
+                            split_block.add_pending_outgoing_edge(e.type, e.target, e.arch, e.fallthrough)
+                        target_block.clear_pending_outgoing_edges()
+                        target_block.add_pending_outgoing_edge(BranchType.UnconditionalBranch, location.addr, arch, True)
+
+                        seen_blocks.add(location)
+                        context.add_basic_block(split_block)
+                        block.add_pending_outgoing_edge(BranchType.UnconditionalBranch, location.addr, arch)
+                        break
 
                 #TODO: change reads to max_instr_length when workaround is removed
 
@@ -146,6 +180,9 @@ def analyze_basic_blocks(arch, func: Function,
                 context.add_basic_block(block)
 
         context.finalize()
+
+def __addr_is_executable(view:BinaryView, addr:int) -> bool:
+    return view.is_offset_executable(addr)
 
 def __resolve_branch(branch:InstructionBranch, instr:Instruction) -> InstructionBranch:
     match branch.type:
