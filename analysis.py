@@ -118,7 +118,7 @@ def analyze_basic_blocks(arch, func: Function,
                 ends_block |= next_section_end <= location.addr
                 #TODO: fall through to next function?
                 header_next = (instr.header is not None and 
-                    (location.addr + instr.size + ARCH_SIZE) % FP_SIZE == 0)
+                    (location.addr + ARCH_SIZE) % FP_SIZE == 0)
                 if (not(is_parallel or header_next) or ends_block): break
             block.add_instruction_data(execution_packet)
             if len(new_branches):
