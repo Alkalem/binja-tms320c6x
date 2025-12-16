@@ -49,7 +49,7 @@ class Disassembler:
         branch_info = self.__get_branch(instr)
         if branch_info is not None:
             result.branch_delay = branch_info.delay
-            if instr.condition.branch and branch_info.conditional:
+            if instr.condition.branch is not None and branch_info.conditional:
                     result.add_branch(BranchType.TrueBranch, branch_info.target)
                     result.add_branch(BranchType.FalseBranch)
             else:

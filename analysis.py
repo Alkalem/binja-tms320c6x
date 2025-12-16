@@ -11,7 +11,7 @@ from queue import SimpleQueue
 from typing import Dict, Optional, Set
 
 from .disassembler.types import ConditionType, Instruction, OperandType, RegisterOperand, Register, ControlRegisterOperand, ControlRegister
-from .constants import ARCH_SIZE, FP_SIZE
+from .constants import ARCH_SIZE, FP_SIZE, HW_SIZE
 from .util import get_delay_consumption
 
 
@@ -68,11 +68,17 @@ def analyze_basic_blocks(arch, func: Function,
                     split_block.fallthrough_to_function = target_block.fallthrough_to_function
                     split_block.has_undetermined_outgoing_edges = target_block.has_undetermined_outgoing_edges
                     split_block.can_exit = target_block.can_exit
+                    split_block.end = target_block.end
 
                     target_block.fallthrough_to_function = False
                     target_block.has_undetermined_outgoing_edges = False
                     target_block.can_exit = True
                     target_block.end = location.addr
+
+                    for addr in range(location.addr, split_block.end, HW_SIZE):
+                        k = ArchAndAddr(arch, addr)
+                        if k in instr_blocks:
+                            instr_blocks[k] = split_block
 
                     for e in target_block.get_pending_outgoing_edges():
                         split_block.add_pending_outgoing_edge(e.type, e.target, e.arch, e.fallthrough)
