@@ -4,14 +4,13 @@ from binaryninja.binaryview import BinaryView
 from binaryninja.enums import BranchType
 from binaryninja.function import ArchAndAddr, Function
 from binaryninja.lowlevelil import LowLevelILFunction
-from binaryninja.log import log_info
+from binaryninja.log import log_info, log_debug
 
 
-from queue import SimpleQueue
 from typing import Dict, Optional, Set
 
 from .disassembler.types import ConditionType, Instruction, OperandType, RegisterOperand, Register, ControlRegisterOperand, ControlRegister
-from .constants import ARCH_SIZE, FP_SIZE, HW_SIZE
+from .constants import ARCH_SIZE, FP_SIZE, HW_SIZE, BRANCH_DELAY
 from .util import get_delay_consumption
 
 
@@ -19,20 +18,20 @@ def analyze_basic_blocks(arch, func: Function,
         context: BasicBlockAnalysisContext) -> None:
     #TODO: sound error handling
     view = func.view
-    blocks_to_process:SimpleQueue[ArchAndAddr] = SimpleQueue()
+    blocks_to_process:list[ArchAndAddr] = list()
     instr_blocks:Dict[ArchAndAddr, BasicBlock] = dict()
     seen_blocks:Set[ArchAndAddr] = set()
 
     # Start by processing the entry point of the function
     start = func.start
-    blocks_to_process.put(ArchAndAddr(arch, start))
+    blocks_to_process.append(ArchAndAddr(arch, start))
     seen_blocks.add(ArchAndAddr(arch, start))
 
-    while not blocks_to_process.empty():
+    while len(blocks_to_process) > 0:
         if view.analysis_is_aborted: return
 
         # Get the next block to process
-        location = blocks_to_process.get()
+        location = blocks_to_process.pop(0)
         # if not __addr_is_executable(view, location.addr):
         #     continue
         # if location in seen_blocks:
@@ -49,6 +48,7 @@ def analyze_basic_blocks(arch, func: Function,
         # For basic block analysis, delay is only relevant for branch instructions.
         delay_slot_count = 0
         pending_branches = list()
+        last_return_write = 0
 
         # Disassemble the instructions in the block
         ends_block = False
@@ -133,27 +133,42 @@ def analyze_basic_blocks(arch, func: Function,
                         pending_branches.append(list())
                     pending_branches[delay].append((condition, branch))
 
-            #TODO: handle branches
-            def handle_branch(branch:InstructionBranch):
+            #TODO: handle function branches and branches with pending delay
+            def handle_branch(branch:InstructionBranch, returns:bool):
+                log_debug(f"Handling {branch.type.name} @{location.addr:08x} to {branch.target:08x}")
                 nonlocal ends_block
                 match branch.type:
                     case BranchType.UnconditionalBranch|BranchType.TrueBranch:
                         ends_block = True
                         if branch.target == 0: return
                         assert branch.target
-                        block.add_pending_outgoing_edge(branch.type, branch.target, arch)
-                        # log_info(f"Unconditional @{location.addr:08x} to {branch.target:08x}")
+                        if returns:
+                            block.add_pending_outgoing_edge(BranchType.CallDestination, branch.target, arch)
+                            ends_block = False
+                        else:
+                            block.add_pending_outgoing_edge(branch.type, branch.target, arch)
+                            add_target_to_process(branch.target)
                     case BranchType.IndirectBranch:
                         ends_block = True
                     case BranchType.FalseBranch:
                         if branch.target == 0:
                             # fallthrough false condition
-                            block.add_pending_outgoing_edge(BranchType.FalseBranch, location.addr, arch)
+                            ends_block = True
+                            target = location.addr
+                            block.add_pending_outgoing_edge(BranchType.FalseBranch, target, arch, True)
                         else:
                             ends_block = True
-                            block.add_pending_outgoing_edge(BranchType.FalseBranch, branch.target, arch)
+                            target = branch.target
+                            block.add_pending_outgoing_edge(BranchType.FalseBranch, target, arch)
+                        add_target_to_process(target)
                     case BranchType.FunctionReturn:
                         ends_block = True
+                    
+            def add_target_to_process(addr:int):
+                target = ArchAndAddr(arch, addr)
+                if target not in seen_blocks:
+                    blocks_to_process.append(target)
+                    seen_blocks.add(target)
 
             # Determine delay of execution packet and consume delay slots
             delay_consumption = 0
@@ -161,14 +176,17 @@ def analyze_basic_blocks(arch, func: Function,
             _header_suffix = view.read(location.addr, FP_SIZE - (location.addr % FP_SIZE))
             for instr in arch.disasm.disasm(execution_packet+_header_suffix, ep_location.addr):
                 delay_consumption = max(get_delay_consumption(instr), delay_consumption)
+                if instr.opcode in ('addkpc', 'callp'):
+                    last_return_write = 0
                 if not (instr.parallel or instr.is_fp_header()): break
             for _ in range(delay_consumption):
                 if len(pending_branches):
                     branches = pending_branches.pop(0)
                     branches = __unify_branches(branches)
                     for _, branch in branches:
-                        handle_branch(branch)
+                        handle_branch(branch, last_return_write <= BRANCH_DELAY)
             delay_slot_count = max(0, delay_slot_count - delay_consumption)
+            last_return_write += delay_consumption
             
             location = ArchAndAddr(arch, ep_location.addr + len(execution_packet))
             if ends_block and not delay_slot_count: break
@@ -209,7 +227,6 @@ def __unify_branches(branches):
     conditions = set()
     for condition, branch in branches:
         if branch.type == BranchType.TrueBranch:
-            conditions.add(condition)
             if ConditionType(condition.value ^ 1) in conditions:
                 require_false_branch = False
                 if branch.target == 0:
@@ -220,6 +237,7 @@ def __unify_branches(branches):
                             break
                 else:
                     branch = InstructionBranch(BranchType.FalseBranch, branch.target, branch.arch)
+            conditions.add(condition)
         elif branch.type == BranchType.FalseBranch:
             continue
         else:
