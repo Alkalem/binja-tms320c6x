@@ -48,7 +48,7 @@ def analyze_basic_blocks(arch, func: Function,
         # For basic block analysis, delay is only relevant for branch instructions.
         delay_slot_count = 0
         pending_branches = list()
-        last_return_write = 0
+        last_return_write = 255
 
         # Disassemble the instructions in the block
         ends_block = False
@@ -135,7 +135,7 @@ def analyze_basic_blocks(arch, func: Function,
 
             #TODO: handle function branches and branches with pending delay
             def handle_branch(branch:InstructionBranch, returns:bool):
-                log_debug(f"Handling {branch.type.name} @{location.addr:08x} to {branch.target:08x}")
+                log_debug(f"Handling {branch.type.name} @{location.addr:08x} to {branch.target:08x} (return? {returns})")
                 nonlocal ends_block
                 match branch.type:
                     case BranchType.UnconditionalBranch|BranchType.TrueBranch:
