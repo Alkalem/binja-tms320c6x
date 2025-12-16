@@ -9,7 +9,7 @@ from binaryninja.log import log_info
 from queue import SimpleQueue
 from typing import Dict, Optional, Set
 
-from .disassembler.types import ConditionType
+from .disassembler.types import ConditionType, Instruction, OperandType, RegisterOperand, Register, ControlRegisterOperand, ControlRegister
 from .constants import ARCH_SIZE, FP_SIZE
 from .util import get_delay_consumption
 
@@ -73,13 +73,14 @@ def analyze_basic_blocks(arch, func: Function,
                         is_parallel = instr.parallel
 
                     for branch in info.branches:
+                        branch = __resolve_branch(branch, instr)
                         new_branch = (info.branch_delay, instr.condition, branch)
                         new_branches.append(new_branch)
 
                     next_func_addr = view.get_next_function_start_after(location.addr)
                     next_section_end = view.get_sections_at(location.addr)[0].end
                     location = ArchAndAddr(arch, location.addr + info.length)
-                    ends_block |= next_func_addr <= location.addr
+                    # ends_block |= next_func_addr <= location.addr
                     ends_block |= next_section_end <= location.addr
                     #TODO: fall through to next function?
                     header_next = (instr.header is not None and 
@@ -93,9 +94,24 @@ def analyze_basic_blocks(arch, func: Function,
                         pending_branches[delay].append((condition, branch))
 
                 #TODO: handle branches
-                def handle_branch(branch):
+                def handle_branch(branch:InstructionBranch):
                     nonlocal ends_block
                     match branch.type:
+                        case BranchType.UnconditionalBranch|BranchType.TrueBranch:
+                            ends_block = True
+                            if branch.target == 0: return
+                            assert branch.target
+                            block.add_pending_outgoing_edge(branch.type, branch.target, arch)
+                            # log_info(f"Unconditional @{location.addr:08x} to {branch.target:08x}")
+                        case BranchType.IndirectBranch:
+                            ends_block = True
+                        case BranchType.FalseBranch:
+                            if branch.target == 0:
+                                # fallthrough false condition
+                                block.add_pending_outgoing_edge(BranchType.FalseBranch, location.addr, arch)
+                            else:
+                                ends_block = True
+                                block.add_pending_outgoing_edge(BranchType.FalseBranch, branch.target, arch)
                         case BranchType.FunctionReturn:
                             ends_block = True
 
@@ -109,7 +125,7 @@ def analyze_basic_blocks(arch, func: Function,
                 for _ in range(delay_consumption):
                     if len(pending_branches):
                         branches = pending_branches.pop(0)
-                        branches = __unify_branches(branches, arch)
+                        branches = __unify_branches(branches)
                         for _, branch in branches:
                             handle_branch(branch)
                 delay_slot_count = max(0, delay_slot_count - delay_consumption)
@@ -131,7 +147,20 @@ def analyze_basic_blocks(arch, func: Function,
 
         context.finalize()
 
-def __unify_branches(branches, arch):
+def __resolve_branch(branch:InstructionBranch, instr:Instruction) -> InstructionBranch:
+    match branch.type:
+        case BranchType.IndirectBranch:
+            # indirect target using register
+            assert (isinstance(instr.operands[0], RegisterOperand)
+                    or isinstance(instr.operands[0], ControlRegisterOperand))
+            if instr.operands[0].register in (
+                    Register.B3, ControlRegister.IRP, ControlRegister.NRP):
+                # usually used as return address
+                branch = InstructionBranch(BranchType.FunctionReturn, branch.target, branch.arch)
+    return branch
+
+def __unify_branches(branches):
+    if len(branches) == 0: return branches
     unified_branches = list()
     require_false_branch = True
     conditions = set()
@@ -140,7 +169,14 @@ def __unify_branches(branches, arch):
             conditions.add(condition)
             if ConditionType(condition.value ^ 1) in conditions:
                 require_false_branch = False
-                branch = InstructionBranch(BranchType.FalseBranch, branch.target, arch)
+                if branch.target == 0:
+                    # only one indirect branch per EP possible
+                    for c,b in unified_branches:
+                        if c == ConditionType(condition.value ^ 1):
+                            b.type = BranchType.FalseBranch
+                            break
+                else:
+                    branch = InstructionBranch(BranchType.FalseBranch, branch.target, branch.arch)
         elif branch.type == BranchType.FalseBranch:
             continue
         else:
@@ -152,6 +188,6 @@ def __unify_branches(branches, arch):
         else:
             # Cannot express negation in one condition
             condition = ConditionType.RESERVED
-        false_branch = InstructionBranch(BranchType.FalseBranch, 0, arch)
+        false_branch = InstructionBranch(BranchType.FalseBranch, 0, branch.arch)
         unified_branches.append((condition, false_branch))
     return branches
