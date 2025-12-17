@@ -21,6 +21,7 @@ def analyze_basic_blocks(arch, func: Function,
     blocks_to_process:list[ArchAndAddr] = list()
     instr_blocks:Dict[ArchAndAddr, BasicBlock] = dict()
     seen_blocks:Set[ArchAndAddr] = set()
+    block_carried_branches = dict()
 
     # Start by processing the entry point of the function
     start = func.start
@@ -48,6 +49,8 @@ def analyze_basic_blocks(arch, func: Function,
         # For basic block analysis, delay is only relevant for branch instructions.
         delay_slot_count = 0
         pending_branches = list()
+        if location in block_carried_branches:
+            pending_branches = block_carried_branches[location]
         last_return_write = 255
 
         # Disassemble the instructions in the block
@@ -84,6 +87,8 @@ def analyze_basic_blocks(arch, func: Function,
                         split_block.add_pending_outgoing_edge(e.type, e.target, e.arch, e.fallthrough)
                     target_block.clear_pending_outgoing_edges()
                     target_block.add_pending_outgoing_edge(BranchType.UnconditionalBranch, location.addr, arch, True)
+
+                    #TODO: check for pending branches at split point
 
                     seen_blocks.add(location)
                     context.add_basic_block(split_block)
@@ -134,8 +139,8 @@ def analyze_basic_blocks(arch, func: Function,
                     pending_branches[delay].append((condition, branch))
 
             #TODO: handle function branches and branches with pending delay
-            def handle_branch(branch:InstructionBranch, returns:bool):
-                log_debug(f"Handling {branch.type.name} @{location.addr:08x} to {branch.target:08x} (return? {returns})")
+            def handle_branch(branch:InstructionBranch, returns:bool, carried_branches):
+                log_debug(f'Handling {branch.type.name} @{location.addr:08x} to {branch.target:08x} (return? {returns})')
                 nonlocal ends_block
                 match branch.type:
                     case BranchType.UnconditionalBranch|BranchType.TrueBranch:
@@ -143,11 +148,12 @@ def analyze_basic_blocks(arch, func: Function,
                         if branch.target == 0: return
                         assert branch.target
                         if returns:
+                            assert len(carried_branches) == 0
                             block.add_pending_outgoing_edge(BranchType.CallDestination, branch.target, arch)
                             ends_block = False
                         else:
                             block.add_pending_outgoing_edge(branch.type, branch.target, arch)
-                            add_target_to_process(branch.target)
+                            add_target_to_process(branch.target, carried_branches)
                     case BranchType.IndirectBranch:
                         ends_block = True
                     case BranchType.FalseBranch:
@@ -160,15 +166,20 @@ def analyze_basic_blocks(arch, func: Function,
                             ends_block = True
                             target = branch.target
                             block.add_pending_outgoing_edge(BranchType.FalseBranch, target, arch)
-                        add_target_to_process(target)
+                        add_target_to_process(target, carried_branches)
                     case BranchType.FunctionReturn:
                         ends_block = True
                     
-            def add_target_to_process(addr:int):
+            def add_target_to_process(addr:int, carried_branches):
                 target = ArchAndAddr(arch, addr)
                 if target not in seen_blocks:
                     blocks_to_process.append(target)
                     seen_blocks.add(target)
+                if target not in block_carried_branches:
+                    block_carried_branches[target] = carried_branches
+                else:
+                    assert block_carried_branches[target] == carried_branches
+
 
             # Determine delay of execution packet and consume delay slots
             delay_consumption = 0
@@ -181,10 +192,11 @@ def analyze_basic_blocks(arch, func: Function,
                 if not (instr.parallel or instr.is_fp_header()): break
             for _ in range(delay_consumption):
                 if len(pending_branches):
-                    branches = pending_branches.pop(0)
-                    branches = __unify_branches(branches)
-                    for _, branch in branches:
-                        handle_branch(branch, last_return_write <= BRANCH_DELAY)
+                    branch_slot = pending_branches.pop(0)
+                    branch_slot = __unify_branches(branch_slot)
+                    for condition, branch in branch_slot:
+                        carried_branches = __get_carried_branches(condition, pending_branches)
+                        handle_branch(branch, last_return_write <= BRANCH_DELAY, carried_branches)
             delay_slot_count = max(0, delay_slot_count - delay_consumption)
             last_return_write += delay_consumption
             
@@ -251,4 +263,23 @@ def __unify_branches(branches):
             condition = ConditionType.RESERVED
         false_branch = InstructionBranch(BranchType.FalseBranch, 0, branch.arch)
         unified_branches.append((condition, false_branch))
-    return branches
+    return unified_branches
+
+def __get_carried_branches(active_condition:ConditionType, pending_branches):
+    carried_branches = list()
+    for branch_slot in pending_branches:
+        carried_branch_slot = list()
+        for condition, branch in branch_slot:
+            if (branch.type == BranchType.FalseBranch
+                    or condition == ConditionType.RESERVED):
+                continue # only carry true case
+            if (condition == active_condition or
+                    condition == ConditionType.UNCONDITIONAL):
+                carried_type = BranchType.UnconditionalBranch if branch.target else BranchType.IndirectBranch
+                carried_branch = InstructionBranch(carried_type, branch.target, branch.arch)
+                carried_branch_slot.append((ConditionType.UNCONDITIONAL, carried_branch))
+        carried_branches.append(carried_branch_slot)
+    while len(carried_branches) and len(carried_branches[-1]) == 0:
+        carried_branches.pop()
+    return carried_branches
+
