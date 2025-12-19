@@ -147,7 +147,7 @@ def analyze_basic_blocks(arch, func: Function,
                         ends_block = True
                         if branch.target == 0: return
                         assert branch.target
-                        if returns:
+                        if returns or is_likely_call(branch, carried_branches):
                             assert len(carried_branches) == 0
                             block.add_pending_outgoing_edge(BranchType.CallDestination, branch.target, arch)
                             ends_block = False
@@ -169,7 +169,13 @@ def analyze_basic_blocks(arch, func: Function,
                         add_target_to_process(target, carried_branches)
                     case BranchType.FunctionReturn:
                         ends_block = True
-                    
+            
+            def is_likely_call(branch:InstructionBranch, carried_branches) -> bool:
+                # This address is not helpful if symbols for basic blocks exist
+                # next_func_addr = view.get_next_function_start_after(location.addr)
+                is_in_function = func.lowest_address <= branch.target
+                return len(carried_branches) == 0 and not is_in_function
+
             def add_target_to_process(addr:int, carried_branches):
                 target = ArchAndAddr(arch, addr)
                 if target not in seen_blocks:
