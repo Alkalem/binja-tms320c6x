@@ -5,7 +5,7 @@ from binaryninja.log import log_warn
 from typing import Any, Generator, Optional
 from dataclasses import dataclass
 
-from .constants import ARCH_SIZE, LOAD_BASE
+from .constants import ARCH_SIZE, LOAD_BASE, BRANCH_DELAY
 from .disassembler import Disassembler as C6xDisassembler
 from .disassembler.types import Operand, Instruction, Register, \
         ImmediateOperand, RegisterOperand, ControlRegisterOperand, \
@@ -36,40 +36,22 @@ class Disassembler:
     
     def info(self, data, addr):
         instructions = self.disasm(data, addr)
-        instr = next(instructions)
+        try:
+            instr = next(instructions)
+        except:
+            log_warn(f'Got invalid data {len(data)} @{addr:08x}')
+            instr = Instruction.invalid(addr, 
+                    2 if addr & 2 else ARCH_SIZE, False, None)
         result = InstructionInfo()
         result.length = instr.size
         if instr.is_invalid() or instr.is_fp_header(): return result
         
         branch_info = self.__get_branch(instr)
         if branch_info is not None:
-            # Work around: calculate instruction delay by look-ahead
-            # (see binaryninja-api issue 6868)
-            branch_delay = branch_info.delay
-            instruction_delay = 0
-            false_target = addr + instr.size
-            current_instr = instr
-            while branch_delay > 0 or current_instr.parallel:
-                try:
-                    current_instr = next(instructions)
-                except StopIteration:
-                    log_warn('instruction stream did not consume branch delay')
-                    break
-                instruction_delay += 1
-                false_target += current_instr.size
-                if current_instr.is_fp_header(): continue
-                if current_instr.parallel: 
-                    branch_delay += 1
-                if current_instr.opcode == 'nop':
-                    assert isinstance(current_instr.operands[0], ImmediateOperand)
-                    branch_delay -= current_instr.operands[0].value
-                else:
-                    branch_delay -= 1
-            
-            result.branch_delay = instruction_delay
-            if instr.condition.branch and branch_info.conditional:
+            result.branch_delay = branch_info.delay
+            if instr.condition.branch is not None and branch_info.conditional:
                     result.add_branch(BranchType.TrueBranch, branch_info.target)
-                    result.add_branch(BranchType.FalseBranch, false_target)
+                    result.add_branch(BranchType.FalseBranch)
             else:
                 result.add_branch(branch_info.type, branch_info.target)
         return result
@@ -81,14 +63,13 @@ class Disassembler:
             case 'swe'|'swenr':
                 return _BranchInfo(0, BranchType.ExceptionBranch, 0, False)
             case 'b'|'bpos'|'bdec':
-                delay, conditional = 5, True
+                conditional = True
             case 'bnop':
-                assert isinstance(instr.operands[1], ImmediateOperand)
-                delay = max(0, 5-instr.operands[1].value)
                 conditional = True
             case'callp':
-                delay, conditional = 0, False
+                conditional = False
             case _: return
+        delay = BRANCH_DELAY
 
         match instr.operands[0]:
             case ImmediateOperand(target):
@@ -261,3 +242,10 @@ def gen_tokens(instr: Instruction, offset: int, parallel:bool):
                 InstructionTextTokenType.NewLineToken, "", 
                 offset))
     return tokens
+
+def gen_newline(offset:int) -> InstructionTextToken:
+    return InstructionTextToken(
+        InstructionTextTokenType.NewLineToken,
+        "", 
+        offset
+    )

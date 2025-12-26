@@ -4,8 +4,9 @@ from binaryninja import log_warn
 
 from typing import List
 
-from .constants import ARCH_SIZE, HW_SIZE, DW_SIZE
+from .constants import ARCH_SIZE, HW_SIZE, DW_SIZE, INSTRUCTION_DELAY
 from .instruction import Disassembler
+from .util import get_delay_consumption
 from .disassembler.types import Instruction, Operand, ImmediateOperand, \
         RegisterOperand, MemoryOperand, Register, AddressingMode
 
@@ -89,7 +90,7 @@ def lift_addk(instr:Instruction, il:LowLevelILFunction, ctx:LiftingContext):
     imm = instr.operands[0].value
     reg = str(instr.operands[1])
     il.append(il.set_reg(ARCH_SIZE, reg, il.add(
-        ARCH_SIZE, il.const(HW_SIZE, imm), il.reg(ARCH_SIZE, reg)
+        ARCH_SIZE, il.const(ARCH_SIZE, imm), il.reg(ARCH_SIZE, reg)
     )))
 
 def lift_cmpeq(instr:Instruction, il:LowLevelILFunction, ctx:LiftingContext):
@@ -256,25 +257,6 @@ HANDLERS_BY_MNEMONIC = {
     # Pseudo-instruction
     'mv': lift_mv
 }
-
-INSTRUCTION_DELAY = {
-    'b': 5,
-    'ldb': 4,
-    'ldw': 4,
-    'mpyi': 8,
-    'stb': 4,
-    'stw': 4,
-}
-
-def get_delay_consumption(instr:Instruction):
-    delay_slots = 1
-    if instr.opcode == 'nop':
-        assert isinstance(instr.operands[0], ImmediateOperand)
-        delay_slots = instr.operands[0].value
-    elif instr.opcode == 'idle':
-        # in theory unlimited, but binja limits delay to 255
-        delay_slots = 255
-    return delay_slots
 
 
 def lift_simple(instr:Instruction, il:LowLevelILFunction, ctx:LiftingContext):
