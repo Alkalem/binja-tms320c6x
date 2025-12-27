@@ -7,11 +7,28 @@ from binaryninja.lowlevelil import LowLevelILFunction
 from binaryninja.log import log_info, log_debug
 
 
+from dataclasses import dataclass
 from typing import Dict, Optional, Set
 
 from .disassembler.types import ConditionType, Instruction, OperandType, RegisterOperand, Register, ControlRegisterOperand, ControlRegister
 from .constants import ARCH_SIZE, FP_SIZE, HW_SIZE, BRANCH_DELAY
 from .util import get_delay_consumption
+
+
+@dataclass
+class SploopContext:
+    active:bool = False
+    sploop:Optional[Instruction] = None
+    start:int = 0
+
+
+    def process(self, i:Instruction):
+        if i.opcode.startswith('sploop'):
+            assert not self.active
+            self.active = True
+            self.sploop = i
+        if self.active and self.start == 0 and not i.parallel:
+            self.start = i.address + i.size
 
 
 def analyze_basic_blocks(arch, func: Function, 
@@ -22,6 +39,7 @@ def analyze_basic_blocks(arch, func: Function,
     instr_blocks:Dict[ArchAndAddr, BasicBlock] = dict()
     seen_blocks:Set[ArchAndAddr] = set()
     block_carried_branches = dict()
+    sploop_blocks = dict()
 
     # Start by processing the entry point of the function
     start = func.start
@@ -47,11 +65,13 @@ def analyze_basic_blocks(arch, func: Function,
         # Due to parallelism and idling instructions,
         # the number of instructions per delay cycle may vary.
         # For basic block analysis, delay is only relevant for branch instructions.
-        delay_slot_count = 0
         pending_branches = list()
         if location in block_carried_branches:
             pending_branches = block_carried_branches[location]
         last_return_write = 255
+        sploop_context = SploopContext()
+        if location in sploop_blocks:
+            sploop_context = sploop_blocks[location]
 
         # Disassemble the instructions in the block
         ends_block = False
@@ -117,6 +137,7 @@ def analyze_basic_blocks(arch, func: Function,
                 if not instr.is_fp_header():
                     is_parallel = instr.parallel
 
+                sploop_context.process(instr)
                 for branch in info.branches:
                     branch = __resolve_branch(branch, instr)
                     new_branch = (info.branch_delay, instr.condition, branch)
@@ -162,6 +183,8 @@ def analyze_basic_blocks(arch, func: Function,
                             ends_block = True
                             target = location.addr
                             block.add_pending_outgoing_edge(BranchType.FalseBranch, target, arch, True)
+                            if sploop_context.active:
+                                sploop_blocks[location] = sploop_context
                         else:
                             ends_block = True
                             target = branch.target
@@ -169,6 +192,23 @@ def analyze_basic_blocks(arch, func: Function,
                         add_target_to_process(target, carried_branches)
                     case BranchType.FunctionReturn:
                         ends_block = True
+                    case BranchType.UserDefinedBranch:
+                        ends_block = True
+                        if sploop_context.sploop is None:
+                            sploop_context.start = block.start
+                        # used for SPLOOP exit branches
+                        block.add_pending_outgoing_edge(
+                            BranchType.TrueBranch,
+                            sploop_context.start,
+                            arch)
+                        block.add_pending_outgoing_edge(
+                            BranchType.FalseBranch,
+                            location.addr,
+                            arch)
+                        add_target_to_process(sploop_context.start, carried_branches)
+                        add_target_to_process(location.addr, carried_branches)
+                        sploop_context.active = False
+                        sploop_context.start = 0
             
             def is_likely_call(branch:InstructionBranch, carried_branches) -> bool:
                 # This address is not helpful if symbols for basic blocks exist
@@ -203,11 +243,10 @@ def analyze_basic_blocks(arch, func: Function,
                     for condition, branch in branch_slot:
                         carried_branches = __get_carried_branches(condition, pending_branches)
                         handle_branch(branch, last_return_write <= BRANCH_DELAY, carried_branches)
-            delay_slot_count = max(0, delay_slot_count - delay_consumption)
             last_return_write += delay_consumption
             
             location = ArchAndAddr(arch, ep_location.addr + len(execution_packet))
-            if ends_block and not delay_slot_count: break
+            if ends_block: break
 
         if location.addr != block.start:
             # Block has one or more instructions, add it to the function
