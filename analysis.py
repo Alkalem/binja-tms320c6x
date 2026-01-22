@@ -1,7 +1,7 @@
 from binaryninja.architecture import BasicBlockAnalysisContext, InstructionBranch
 from binaryninja.basicblock import BasicBlock
 from binaryninja.binaryview import BinaryView
-from binaryninja.enums import BranchType
+from binaryninja.enums import BranchType, FunctionAnalysisSkipOverride
 from binaryninja.function import ArchAndAddr, Function
 from binaryninja.lowlevelil import LowLevelILFunction
 from binaryninja.log import log_info, log_debug
@@ -9,7 +9,7 @@ from binaryninja.log import log_info, log_debug
 
 from typing import Dict, Optional, Set
 
-from .disassembler.types import ConditionType, Instruction, OperandType, RegisterOperand, Register, ControlRegisterOperand, ControlRegister
+from .disassembler.types import ConditionType, Instruction, OperandType, RegisterOperand, Register, ControlRegisterOperand, ControlRegister, RW
 from .constants import ARCH_SIZE, FP_SIZE, HW_SIZE, BRANCH_DELAY
 from .util import get_delay_consumption
 
@@ -27,6 +27,13 @@ def analyze_basic_blocks(arch, func: Function,
     start = func.start
     blocks_to_process.append(ArchAndAddr(arch, start))
     seen_blocks.add(ArchAndAddr(arch, start))
+
+    total_size = 0
+    if context.analysis_skip_override == FunctionAnalysisSkipOverride.AlwaysSkipFunctionAnalysis:
+        max_size = 0
+    else:
+        max_size = context.max_function_size
+    max_size_reached = False
 
     while len(blocks_to_process) > 0:
         if view.analysis_is_aborted: return
@@ -47,7 +54,6 @@ def analyze_basic_blocks(arch, func: Function,
         # Due to parallelism and idling instructions,
         # the number of instructions per delay cycle may vary.
         # For basic block analysis, delay is only relevant for branch instructions.
-        delay_slot_count = 0
         pending_branches = list()
         if location in block_carried_branches:
             pending_branches = block_carried_branches[location]
@@ -142,11 +148,17 @@ def analyze_basic_blocks(arch, func: Function,
             def handle_branch(branch:InstructionBranch, returns:bool, carried_branches):
                 log_debug(f'Handling {branch.type.name} @{location.addr:08x} to {branch.target:08x} (return? {returns})')
                 nonlocal ends_block
+
                 match branch.type:
                     case BranchType.UnconditionalBranch|BranchType.TrueBranch:
                         ends_block = True
                         if branch.target == 0: return
                         assert branch.target
+                        target = ArchAndAddr(arch, branch.target)
+
+                        if view.should_skip_target_analysis(location, func, location.addr, target):
+                            return
+
                         if returns or is_likely_call(branch, carried_branches):
                             assert len(carried_branches) == 0
                             block.add_pending_outgoing_edge(BranchType.CallDestination, branch.target, arch)
@@ -193,7 +205,11 @@ def analyze_basic_blocks(arch, func: Function,
             _header_suffix = view.read(location.addr, FP_SIZE - (location.addr % FP_SIZE))
             for instr in arch.disasm.disasm(execution_packet+_header_suffix, ep_location.addr):
                 delay_consumption = max(get_delay_consumption(instr), delay_consumption)
-                if instr.opcode in ('addkpc', 'callp'):
+                if (instr.opcode in ('addkpc', 'callp')
+                        or any((RW.write in op.access_info.rw 
+                            and isinstance(op, RegisterOperand)
+                            and op.register == Register.B3
+                            for op in instr.operands))):
                     last_return_write = 0
                 if not (instr.parallel or instr.is_fp_header()): break
             for _ in range(delay_consumption):
@@ -203,11 +219,17 @@ def analyze_basic_blocks(arch, func: Function,
                     for condition, branch in branch_slot:
                         carried_branches = __get_carried_branches(condition, pending_branches)
                         handle_branch(branch, last_return_write <= BRANCH_DELAY, carried_branches)
-            delay_slot_count = max(0, delay_slot_count - delay_consumption)
             last_return_write += delay_consumption
             
             location = ArchAndAddr(arch, ep_location.addr + len(execution_packet))
-            if ends_block and not delay_slot_count: break
+
+            # update and check termination conditions
+            total_size += len(execution_packet)
+
+            if ends_block: break
+            if (max_size and total_size > max_size):
+                max_size_reached = True
+                break
 
         if location.addr != block.start:
             # Block has one or more instructions, add it to the function
@@ -220,7 +242,10 @@ def analyze_basic_blocks(arch, func: Function,
             else:
                 block.end = location.addr
             context.add_basic_block(block)
+        
+        if max_size_reached: break
 
+    if max_size_reached: context.max_size_reached = True
     context.finalize()
 
 def __addr_is_executable(view:BinaryView, addr:int) -> bool:
