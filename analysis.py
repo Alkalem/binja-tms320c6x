@@ -159,7 +159,7 @@ def analyze_basic_blocks(arch, func: Function,
                         if view.should_skip_target_analysis(location, func, location.addr, target):
                             return
 
-                        if returns or is_likely_call(branch, carried_branches):
+                        if is_likely_call(branch, carried_branches, returns):
                             assert len(carried_branches) == 0
                             block.add_pending_outgoing_edge(BranchType.CallDestination, branch.target, arch)
                             ends_block = False
@@ -168,6 +168,15 @@ def analyze_basic_blocks(arch, func: Function,
                             add_target_to_process(branch.target, carried_branches)
                     case BranchType.IndirectBranch:
                         ends_block = True
+                        target_type = branch.type
+                        if is_likely_call(branch, carried_branches, returns):
+                            assert len(carried_branches) == 0
+                            ends_block = False
+                        for indirect_branch in context.indirect_branches:
+                            if (indirect_branch.source_addr != location.addr):
+                                continue
+                            block.add_pending_outgoing_edge(target_type, indirect_branch.dest_addr, arch)
+                            add_target_to_process(indirect_branch.dest_addr, carried_branches)
                     case BranchType.FalseBranch:
                         if branch.target == 0:
                             # fallthrough false condition
@@ -182,11 +191,13 @@ def analyze_basic_blocks(arch, func: Function,
                     case BranchType.FunctionReturn:
                         ends_block = True
             
-            def is_likely_call(branch:InstructionBranch, carried_branches) -> bool:
+            def is_likely_call(branch:InstructionBranch, carried_branches,
+                    returns:bool) -> bool:
                 # This address is not helpful if symbols for basic blocks exist
                 # next_func_addr = view.get_next_function_start_after(location.addr)
                 is_in_function = func.lowest_address <= branch.target
-                return len(carried_branches) == 0 and not is_in_function
+                return (len(carried_branches) == 0 and 
+                    (not is_in_function or returns))
 
             def add_target_to_process(addr:int, carried_branches):
                 target = ArchAndAddr(arch, addr)
