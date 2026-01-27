@@ -26,6 +26,4 @@ INSTRUCTION_DELAY = {
     'ldb': 4,
     'ldw': 4,
     'mpyi': 8,
-    'stb': 4,
-    'stw': 4,
 }

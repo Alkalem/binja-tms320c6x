@@ -16,7 +16,7 @@
 
 from binaryninja.lowlevelil import LowLevelILFunction, ExpressionIndex, \
         LLIL_TEMP, LLIL_GET_TEMP_REG_INDEX
-from binaryninja import log_warn
+from binaryninja.log import log_warn
 
 from typing import List
 
@@ -224,32 +224,16 @@ def lift_mpyi(instr:Instruction, il:LowLevelILFunction, ctx:LiftingContext):
     return ((8, result),)
 
 def lift_stb(instr:Instruction, il:LowLevelILFunction, ctx:LiftingContext):
-    value = alloc_temp(ctx)
-    store_temp(value, to_il(instr.operands[0], il), il)
-    dest = alloc_temp(ctx)
-    store_temp(dest, to_il(instr.operands[1], il), il)
+    value = to_il(instr.operands[0], il)
+    dest = to_il(instr.operands[1], il)
+    il.append(il.store(1, dest, value))
     post_instr(instr.operands[1], il)
-    
-    def store(il:LowLevelILFunction):
-        il.set_current_address(instr.address)
-        il.append(il.store(1, get_temp(dest, il), get_temp(value, il)))
-        free_temp(ctx, value)
-        free_temp(ctx, dest)
-    return ((4, store),)
 
 def lift_stw(instr:Instruction, il:LowLevelILFunction, ctx:LiftingContext):
-    value = alloc_temp(ctx)
-    store_temp(value, to_il(instr.operands[0], il), il)
-    dest = alloc_temp(ctx)
-    store_temp(dest, to_il(instr.operands[1], il), il)
+    value = to_il(instr.operands[0], il)
+    dest = to_il(instr.operands[1], il)    
+    il.append(il.store(ARCH_SIZE, dest, value))
     post_instr(instr.operands[1], il)
-    
-    def store(il:LowLevelILFunction):
-        il.set_current_address(instr.address)
-        il.append(il.store(ARCH_SIZE, get_temp(dest, il), get_temp(value, il)))
-        free_temp(ctx, value)
-        free_temp(ctx, dest)
-    return ((4, store),)
 
 
 HANDLERS_BY_MNEMONIC = {
