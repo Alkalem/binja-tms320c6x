@@ -16,7 +16,7 @@
 
 from binaryninja.lowlevelil import LowLevelILFunction, ExpressionIndex, \
         LLIL_TEMP, LLIL_GET_TEMP_REG_INDEX
-from binaryninja.log import log_warn
+from binaryninja.log import log_warn, log_info, log_debug
 
 from typing import List
 
@@ -156,7 +156,7 @@ def alloc_temp(ctx:LiftingContext) -> int:
     else:
         return ctx.free_temp_regs.pop()
 
-def store_temp(reg_id:int, value, il):
+def store_temp(reg_id, value, il):
     tmp = LLIL_TEMP(reg_id)
     il.append(il.set_reg(ARCH_SIZE, tmp, value))
 
@@ -316,7 +316,8 @@ def lift_delayed_packet(packet:List[Instruction], disasm:Disassembler,
             break
     return lifted_bytes
 
-def lift_il(disasm:Disassembler, data:bytes, addr:int, il: LowLevelILFunction):
+def lift_il(arch, data:bytes, addr:int, il: LowLevelILFunction):
+    disasm:Disassembler = arch.disasm
     instruction_stream = gen_instructions(data, addr)
     execution_packet = get_execution_packet(disasm, instruction_stream)
     
@@ -324,6 +325,11 @@ def lift_il(disasm:Disassembler, data:bytes, addr:int, il: LowLevelILFunction):
         return lift_delayed_packet(execution_packet, disasm, 
                 instruction_stream, il)
 
+    if execution_packet[0].address == 0x1337:
+        ctx = LiftingContextAlt(arch, il, LiftingSettings(False))
+        log_debug(f'Alternative lifting algorithm @{execution_packet[0].address:08x}')
+        lift_ep(ctx, execution_packet)
+        return sum(map(lambda instr: instr.size, execution_packet))
     return lift_simple_packet(execution_packet, il)
 
 
@@ -347,6 +353,273 @@ def get_execution_packet(disasm:Disassembler, stream) -> List[Instruction]:
         # parallel bit chains instructions in same execution packet.
         if not (instr.parallel and ((current_addr+4) % (ARCH_SIZE * 8))): break
     return execution_packet
-        
 
+## WIP: unified parallel and delayed lifting skeleton
+
+from binaryninja.architecture import RegisterName
+from binaryninja.lowlevelil import ILRegister
+
+from collections import deque
+from dataclasses import dataclass
+from typing import Any
+
+from .disassembler.types import RW, FuncUnitsOperand, ControlRegisterOperand, RegisterPairOperand
+
+@dataclass(frozen=True)
+class LiftingSettings:
+    header_based: bool
+    simplify: bool = False
+
+class TempAllocator:
+    def __init__(self, arch) -> None:
+        self.arch = arch
+        self.max_temp_reg:int = 0
+        self.free_temp_regs:List[int] = list()
+    
+    def alloc(self) -> ILRegister:
+        if len(self.free_temp_regs) == 0:
+            reg_id = self.max_temp_reg
+            self.max_temp_reg += 1
+        else:
+            reg_id = self.free_temp_regs.pop()
+        return ILRegister(self.arch, LLIL_TEMP(reg_id))
+
+    def free(self, tmp):
+        self.free_temp_regs.append(LLIL_GET_TEMP_REG_INDEX(tmp))
+
+class TempReadAllocator:
+    def __init__(self, il: LowLevelILFunction, temp_alloc: TempAllocator) -> None:
+        self.il = il
+        self.temp_alloc = temp_alloc
+        self.references:dict[RegisterName, int] = dict()
+        self.assignments:dict[RegisterName, ILRegister] = dict()
+
+    def alloc(self, reg: RegisterName) -> ILRegister:
+        if reg in self.references:
+            self.references[reg] += 1
+        else:
+            self.references[reg] = 1
+            temp_reg = self.temp_alloc.alloc()
+            self.assignments[reg] = temp_reg
+            value = self.il.reg(ARCH_SIZE, reg)
+            store_temp(temp_reg, value, self.il)            
+        return self.assignments[reg]
+    
+    def free(self, reg: RegisterName):
+        if reg not in self.references: return
+        self.references[reg] -= 1
+        if self.references[reg] <= 0:
+            del self.references[reg]
+            self.temp_alloc.free(self.assignments[reg])
+            del self.assignments[reg]
+
+class LiftingContextAlt:
+    def __init__(self, arch, il: LowLevelILFunction, settings: LiftingSettings) -> None:
+        self.arch = arch
+        self.il = il
+        self.setting = settings
+        self.read_queue:LiftingQueue[InputOperand] = LiftingQueue(32)
+        self.op_queue:LiftingQueue[Operation] = LiftingQueue(32)
+        self.write_queue:LiftingQueue[OutputOperand] = LiftingQueue(32)
+        self.temp_alloc = TempAllocator(arch)
+
+def to_il_alt(operand:Operand, il:LowLevelILFunction) -> ExpressionIndex:
+    match operand:
+        case ImmediateOperand(value):
+            return il.const(ARCH_SIZE, value)
+        case FuncUnitsOperand(_):
+            raise NotImplementedError(f'lifting of functional unit masks')
+        case _:
+            raise NotImplementedError(f'lifting of {type(operand)}')
+
+def lift_simple_alt(instr:Instruction, il:LowLevelILFunction, ctx:LiftingContext):
+    inputs = list()
+    output = None
+    for operand in instr.operands:
+        match operand.access_info.rw:
+            case RW.none:
+                inputs.append(to_il_alt(operand, il))
+            case RW.read:
+                inputs.append(operand)
+            case RW.read_write:
+                assert output is None, 'Only one output operand expected'
+                output = operand
+            case RW.write:
+                assert output is None, 'Only one output operand expected'
+                output = operand
+    return
+
+def _get_bin_op_cb(il: LowLevelILFunction, op):
+    def __lift(src1: ExpressionIndex, src2: ExpressionIndex) -> ExpressionIndex:
+        result = op(ARCH_SIZE, src1, src2)
+        return result
+    return __lift
+
+def get_add_cb(il: LowLevelILFunction):
+    return _get_bin_op_cb(il, il.add)
+
+class LiftingQueue[T]:
+    def __init__(self, max_items: int) -> None:
+        self.cycle_queues:deque[deque] = deque(maxlen=12)
+        self.max_items = max_items
+
+    def enqueue(self, items: list[tuple[int, T]], front=False):
+        for delay, value in items:
+            while len(self.cycle_queues) <= delay:
+                self.cycle_queues.append(deque(maxlen=self.max_items))
+            if front:
+                self.cycle_queues[delay].appendleft(value)
+            else:
+                self.cycle_queues[delay].append(value)
+    
+    def dequeue(self) -> deque[T]:
+        if len(self.cycle_queues) == 0:
+            return deque()
+        else:
+            return self.cycle_queues.popleft()
+
+class InputOperand:
+    def __init__(self, src: Operand, il: LowLevelILFunction) -> None:
+        self.src = src
+        self.il = il
+        self.handles:dict[RegisterName, ILRegister] = dict()
+        self._is_read = False
+        self.low = True
+
+    def read(self, alloc: TempReadAllocator):
+        if self._is_read: return
+        # allocate register reads and store handles
+        self._is_read = True
+        match self.src:
+            case RegisterOperand(reg) | ControlRegisterOperand(reg):
+                reg_name = RegisterName(reg.name)
+                self.handles[reg_name] = alloc.alloc(reg_name)
+            case RegisterPairOperand(high, low):
+                if self.low:
+                    self._is_read = self.low = False
+                    reg_name = RegisterName(low.name)
+                else:
+                    reg_name = RegisterName(high.name)
+                self.handles[reg_name] = alloc.alloc(reg_name)
+
+    def to_expr(self) -> ExpressionIndex:
+        match self.src:
+            case ImmediateOperand(value):
+                return self.il.const(ARCH_SIZE, value)
+            case RegisterOperand(reg) | ControlRegisterOperand(reg):
+                reg = self.handles[RegisterName(reg.name)]
+                return self.il.reg(ARCH_SIZE, reg)
+            case RegisterPairOperand(high, low):
+                hi = self.handles[RegisterName(high.name)]
+                lo = self.handles[RegisterName(low.name)]
+                return self.il.reg_split(ARCH_SIZE, hi, lo)
+            case MemoryOperand(mode, base, offset, scaled):
+                raise NotImplementedError(f'lifting of memory operands')
+            case FuncUnitsOperand(_):
+                raise NotImplementedError(f'lifting of functional unit masks')
+            case _:
+                raise NotImplementedError(f'lifting of {type(self.src)}')
+
+class Operation:
+    def __init__(self, inputs: list[InputOperand], callback) -> None:
+        self.inputs = inputs
+        self.callback = callback
+        self._result = None
+        self._stored = False
+    
+    def _to_expr(self) -> ExpressionIndex:
+        input_exprs = (input.to_expr() for input in self.inputs)
+        output_expr = self.callback(*input_exprs)
+        return output_expr
+
+    def store(self, allocator: TempAllocator, il: LowLevelILFunction):
+        if self._stored: return
+        result = self.to_expr()
+        store_temp(allocator.alloc(), result, il) 
+        self._stored = True
+
+    def to_expr(self) -> ExpressionIndex:
+        if self._result is None:
+            self._result = self._to_expr()
+        return self._result
+
+class OutputOperand:
+    def __init__(self, src:Operand, operation: Operation) -> None:
+        self.src = src
+        self.operation = operation
+
+    def write(self, il:LowLevelILFunction):
+        match self.src:
+            case RegisterOperand(reg):
+                value = self.operation.to_expr()
+                il.append(il.set_reg(ARCH_SIZE, RegisterName(reg.name), value))
+
+class LiftInstruction:
+    def __init__(self, src: Instruction, il: LowLevelILFunction) -> None:
+        self.src = src
+        self.inputs: list[InputOperand] = list()
+        self._reads = list()
+        self._writes = list()
+        self.output: OutputOperand | None = None
+        for operand in src.operands:
+            if operand.access_info.rw in (RW.none, RW.read, RW.read_write):
+                input = InputOperand(operand, il)
+                if operand.access_info.low_last:
+                    self._reads.append((operand.access_info.low_last-1, input))
+                if operand.access_info.high_last:
+                    self._reads.append((operand.access_info.high_last-1, input))
+                self.inputs.append(input)
+        self.lift_cycle: int = max(map(lambda c: c[0], self._reads))
+        self.operation = Operation(self.inputs, get_add_cb(il))
+        for operand in src.operands:
+            if operand.access_info.rw in (RW.write, RW.read_write):
+                self.output = OutputOperand(operand, self.operation)
+                if operand.access_info.low_first:
+                    self._writes.append((operand.access_info.low_first-1, self.output))
+                if operand.access_info.high_first:
+                    self._writes.append((operand.access_info.high_first-1, self.output))
+
+    def is_first(self) -> bool:
+        return self.src.opcode.lower().startswith('ld')
+
+    def get_reads(self) -> list[tuple[int, InputOperand]]:
+        return self._reads
+
+    def get_operation(self) -> tuple[int, Operation]:
+        return (self.lift_cycle, self.operation)
+    
+    def get_writes(self) -> list[tuple[int, OutputOperand]]:
+        return self._writes
+
+def lift_ep(ctx: LiftingContextAlt, packet: list[Instruction]):
+    allocator = TempReadAllocator(ctx.il, ctx.temp_alloc)
+    
+    # 1. Convert instructions to helper objects for lifting
+    lift_packet = [LiftInstruction(instr, ctx.il) for instr in packet]
+
+    # 2. Enqueue parts of the EPs instructions in lifting queues
+    for lift_instr in lift_packet:
+        ctx.read_queue.enqueue(lift_instr.get_reads())
+        ctx.op_queue.enqueue([lift_instr.get_operation()], lift_instr.is_first())
+        ctx.write_queue.enqueue(lift_instr.get_writes())
+    
+    # 3. Translate one cycle of pipeline execution to IL
+    for input in ctx.read_queue.dequeue():
+        input.read(allocator)
+    for operation in ctx.op_queue.dequeue():
+        operation.store(ctx.temp_alloc, ctx.il)
+    for output in ctx.write_queue.dequeue():
+        output.write(ctx.il)
+
+# def prepare_ep_lifting(packet: List[Instruction]) -> LiftPacket:
+
+# def lift_basic_block(block: BasicBlock, func: LowLevelILFunction) -> BlockLiftingResult:
+# BlockLiftingResult ~= bool, pending instructions
+
+# def lift_instruction(arch, func: LowLevelILFunction) -> int:
+# Lift instruction based until function-based lifting is supported and implemented.
+# Should lift entire EPs if possible, may lift until end of block to translate delays correctly.
+
+# def lift_function(arch, func: LowLevelILFunction, context: FunctionLifterContext) -> bool:
+# Lift entire function after analysis, by lifting basic blocks, their delayed instructions, and their branches.
 

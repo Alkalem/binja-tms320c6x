@@ -44,7 +44,7 @@ class TMS320C6xBaseArch(Architecture):
         return self.disasm.info(data, addr)
     
     def get_instruction_low_level_il(self, data, addr, il):
-        return lift_il(self.disasm, data, addr, il)
+        return lift_il(self, data, addr, il)
 
     def analyze_basic_blocks(self, func: Function, 
             context: BasicBlockAnalysisContext) -> None:

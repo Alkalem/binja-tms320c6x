@@ -28,7 +28,7 @@ This plugin implements multiple architecture variants for different compilers. T
 
 We define high halves of the registers for use in lifting (e.g., of `mvkh`).
 
-### Custom Block Analysis
+## Custom Block Analysis
 
 The overall structure of the block analysis is similar to the default algorithm. It iteratively processes basic blocks and outgoing branches until no more changes are made. Branches may add new targets (block or function) for analysis or split a block in two.
 
@@ -39,6 +39,20 @@ Analysis steps through blocks an EP at a time. Branches are added to a queue acc
 On a branch to a basic block, the algorithm not only registers this block as a target for analysis. Pending branches are taken into account as well. They are stored for each basic block start to correctly analyze the block later. For example, a block might end after one cycle if a branch was queued four cycles earlier. We also compare pending branches if multiple edges converge at one basic block. That is because assumptions for higher level analysis break if one block has different pending branch targets. We want to at least detect such cases.
 
 SPLOOP support is implemented by creating a loop context with the start address when an SPLOOP is detected. This context is carried linearly up to the SPKERNEL(R) instruction. There, the loop start is added as conditional target. A loop context might cross basic block boundaries because conditional branches or incoming branches might split the loop body without ending the SPLOOP in the fallthrough case.
+
+## Lifting
+
+Binary Ninja does not have a concept of parallel execution or delayed instructions. The plugin needs to convert such instructions into an equivalent sequence of IL instructions. This can be done by splitting instructions in parts like reads, calculation and write back. The parts are interleaved as they would be executed on a CPU. By default, binary ninja knows registers and memory addresses and tracks possible value sets for analysis. If a location is written that is required in its current state, simple serialization produces incorrect results. Such data conflicts can be resolved by storing values in temporary registers or sometimes by reordering of instructions.
+
+Delayed instructions can easily produce data conflicts, as parameters or results are accessed multiple cycles later. However, even parallel instructions may produce conflicts. For example, the pair `mv x, y || mv y, x` already requires a temporary register, even though both instructions are single cycle. In consequence, every instruction is treated equally during lifting.
+
+### Pipeline Lifting Algorithm
+
+This approach converts instructions to low-level IL in a way that closely resembles the pipeline execution on a real CPU. Lifting of each cycle follows a simple pattern: 1. lift register reads, 2. lift instructions with complete operands, 3. write results back. Each instruction is split into these parts. Delayed instructions are modeled by scheduling some parts for later cycles. Temporary values are always stored in temporary registers. This pattern should be easier to design and test, however it may use a large number of temp registers.
+
+The delay for register reads and write back of results is documented for each instruction type. For some instructions, there are multiple cycles of delay between the last read cycle and the first write cycle. This degree of freedom for lifting the instruction semantic is resolved by lifting instructions as early as possible. That means, as soon as all operands are available. This reduces the number of temp registers used for each cycle and likely reduces conflicts.
+
+Temp register cycles for MPYDP: earliest lifting: 3+2+1+5+6 = 17, latest lifting: 9+8+7+6 = 30
 
 ## Challenges
 
