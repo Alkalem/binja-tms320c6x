@@ -325,13 +325,15 @@ def lift_il(arch, data:bytes, addr:int, il: LowLevelILFunction):
         return lift_delayed_packet(execution_packet, disasm, 
                 instruction_stream, il)
 
-    if execution_packet[0].address == 0x1337:
+    if ALT_LIFTING_START <= execution_packet[0].address <= ALT_LIFTING_END:
         ctx = LiftingContextAlt(arch, il, LiftingSettings(False))
         log_debug(f'Alternative lifting algorithm @{execution_packet[0].address:08x}')
         lift_ep(ctx, execution_packet)
         return sum(map(lambda instr: instr.size, execution_packet))
     return lift_simple_packet(execution_packet, il)
 
+ALT_LIFTING_START = 0x1e18
+ALT_LIFTING_END = 0x1e20
 
 def gen_instructions(data:bytes, addr:int):
     offset = 0
@@ -360,6 +362,7 @@ from binaryninja.architecture import RegisterName
 from binaryninja.lowlevelil import ILRegister
 
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -458,6 +461,16 @@ def _get_bin_op_cb(il: LowLevelILFunction, op):
 def get_add_cb(il: LowLevelILFunction):
     return _get_bin_op_cb(il, il.add)
 
+def get_unimplemented_cb(il: LowLevelILFunction):
+    def __lift(): return il.unimplemented()
+    return __lift
+
+_lifting_cb_type = Callable[[ExpressionIndex, ExpressionIndex], ExpressionIndex]
+_lifting_gen_type = Callable[[LowLevelILFunction], _lifting_cb_type]
+OPCODE_CALLBACKS: dict[str, _lifting_gen_type] = {
+    'add': get_add_cb,
+}
+
 class LiftingQueue[T]:
     def __init__(self, max_items: int) -> None:
         self.cycle_queues:deque[deque] = deque(maxlen=12)
@@ -524,6 +537,7 @@ class Operation:
     def __init__(self, inputs: list[InputOperand], callback) -> None:
         self.inputs = inputs
         self.callback = callback
+        self.has_output = False
         self._result = None
         self._stored = False
     
@@ -561,6 +575,12 @@ class LiftInstruction:
         self._reads = list()
         self._writes = list()
         self.output: OutputOperand | None = None
+        self.lift_cycle: int = 0
+
+        if src.opcode not in OPCODE_CALLBACKS:
+            self.operation = Operation([], get_unimplemented_cb(il))
+            return
+        
         for operand in src.operands:
             if operand.access_info.rw in (RW.none, RW.read, RW.read_write):
                 input = InputOperand(operand, il)
@@ -569,11 +589,12 @@ class LiftInstruction:
                 if operand.access_info.high_last:
                     self._reads.append((operand.access_info.high_last-1, input))
                 self.inputs.append(input)
-        self.lift_cycle: int = max(map(lambda c: c[0], self._reads))
+        self.lift_cycle = max(map(lambda c: c[0], self._reads))
         self.operation = Operation(self.inputs, get_add_cb(il))
         for operand in src.operands:
             if operand.access_info.rw in (RW.write, RW.read_write):
                 self.output = OutputOperand(operand, self.operation)
+                self.operation.has_output = True
                 if operand.access_info.low_first:
                     self._writes.append((operand.access_info.low_first-1, self.output))
                 if operand.access_info.high_first:
@@ -607,7 +628,10 @@ def lift_ep(ctx: LiftingContextAlt, packet: list[Instruction]):
     for input in ctx.read_queue.dequeue():
         input.read(allocator)
     for operation in ctx.op_queue.dequeue():
-        operation.store(ctx.temp_alloc, ctx.il)
+        if operation.has_output:
+            operation.store(ctx.temp_alloc, ctx.il)
+        else:
+            ctx.il.append(operation.to_expr())
     for output in ctx.write_queue.dequeue():
         output.write(ctx.il)
 
