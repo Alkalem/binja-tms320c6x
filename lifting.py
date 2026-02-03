@@ -364,7 +364,7 @@ from binaryninja.lowlevelil import ILRegister
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional, Sequence, Iterable
 
 from .disassembler.types import RW, FuncUnitsOperand, ControlRegisterOperand, RegisterPairOperand
 
@@ -453,19 +453,19 @@ def lift_simple_alt(instr:Instruction, il:LowLevelILFunction, ctx:LiftingContext
     return
 
 def _get_bin_op_cb(il: LowLevelILFunction, op):
-    def __lift(src1: ExpressionIndex, src2: ExpressionIndex) -> ExpressionIndex:
+    def __lift(src1: ExpressionIndex, src2: ExpressionIndex) -> Sequence[ExpressionIndex]:
         result = op(ARCH_SIZE, src1, src2)
-        return result
+        return (result,)
     return __lift
 
 def get_add_cb(il: LowLevelILFunction):
     return _get_bin_op_cb(il, il.add)
 
 def get_unimplemented_cb(il: LowLevelILFunction):
-    def __lift(): return il.unimplemented()
+    def __lift(): return (il.unimplemented(),)
     return __lift
 
-_lifting_cb_type = Callable[[ExpressionIndex, ExpressionIndex], ExpressionIndex]
+_lifting_cb_type = Callable[[ExpressionIndex, ExpressionIndex], Sequence[ExpressionIndex]]
 _lifting_gen_type = Callable[[LowLevelILFunction], _lifting_cb_type]
 OPCODE_CALLBACKS: dict[str, _lifting_gen_type] = {
     'add': get_add_cb,
@@ -499,74 +499,152 @@ class InputOperand:
         self._is_read = False
         self.low = True
 
-    def read(self, alloc: TempReadAllocator):
+    def read(self, allocator: TempReadAllocator):
         if self._is_read: return
         # allocate register reads and store handles
         self._is_read = True
         match self.src:
             case RegisterOperand(reg) | ControlRegisterOperand(reg):
                 reg_name = RegisterName(reg.name)
-                self.handles[reg_name] = alloc.alloc(reg_name)
+                self.handles[reg_name] = allocator.alloc(reg_name)
             case RegisterPairOperand(high, low):
                 if self.low:
                     self._is_read = self.low = False
                     reg_name = RegisterName(low.name)
                 else:
                     reg_name = RegisterName(high.name)
-                self.handles[reg_name] = alloc.alloc(reg_name)
+                self.handles[reg_name] = allocator.alloc(reg_name)
+            case MemoryOperand(_, base, offset, _):
+                reg_name = RegisterName(base.name)
+                self.handles[reg_name] = allocator.alloc(reg_name)
+                if isinstance(offset, Register):
+                    reg_name = RegisterName(offset.name)
+                    self.handles[reg_name] = allocator.alloc(reg_name)
 
     def to_expr(self) -> ExpressionIndex:
+        il = self.il
         match self.src:
             case ImmediateOperand(value):
-                return self.il.const(ARCH_SIZE, value)
+                return il.const(ARCH_SIZE, value)
             case RegisterOperand(reg) | ControlRegisterOperand(reg):
                 reg = self.handles[RegisterName(reg.name)]
-                return self.il.reg(ARCH_SIZE, reg)
+                return il.reg(ARCH_SIZE, reg)
             case RegisterPairOperand(high, low):
                 hi = self.handles[RegisterName(high.name)]
                 lo = self.handles[RegisterName(low.name)]
-                return self.il.reg_split(ARCH_SIZE, hi, lo)
+                return il.reg_split(ARCH_SIZE, hi, lo)
             case MemoryOperand(mode, base, offset, scaled):
-                raise NotImplementedError(f'lifting of memory operands')
+                base = self.handles[RegisterName(base.name)]
+                base_il = il.reg(ARCH_SIZE, base)
+                if isinstance(offset, Register):
+                    offset = self.handles[RegisterName(offset.name)]
+                    offset_il = il.reg(ARCH_SIZE, offset)
+                else:
+                    offset_il = self.il.const(ARCH_SIZE, offset)
+                if scaled:
+                    offset_il = il.mult(ARCH_SIZE, 
+                        offset_il,
+                        il.const(ARCH_SIZE, self.src.access_info.size))
+                match mode:
+                    case (AddressingMode.NEG_OFFSET
+                            | AddressingMode.PREDECREMENT
+                            | AddressingMode.POSTDECREMENT):
+                        offset_il = il.neg_expr(ARCH_SIZE, offset_il)
+                self.address = il.add(ARCH_SIZE, base_il, offset_il)
+                match mode:
+                    case (AddressingMode.POSTDECREMENT 
+                            | AddressingMode.POSTINCREMENT):
+                        return base_il
+                    case _:
+                        return self.address
             case FuncUnitsOperand(_):
                 raise NotImplementedError(f'lifting of functional unit masks')
             case _:
                 raise NotImplementedError(f'lifting of {type(self.src)}')
+            
+    def get_passthrough(self) -> Optional[ExpressionIndex]:
+        if isinstance(self.src, MemoryOperand):
+            if self.src.mode in (AddressingMode.NEG_OFFSET, AddressingMode.POS_OFFSET):
+                    return None
+            return self.address
+        return None
 
 class Operation:
     def __init__(self, inputs: list[InputOperand], callback) -> None:
         self.inputs = inputs
         self.callback = callback
-        self.has_output = False
+        self._outputs = list()
+        self._lifted = False
+        self._statements: Sequence[ExpressionIndex] = tuple()
+        self._output_exprs: Sequence[ExpressionIndex] = tuple()
         self._result = None
         self._stored = False
     
-    def _to_expr(self) -> ExpressionIndex:
+    def _lift(self):
+        if self._lifted: return
         input_exprs = (input.to_expr() for input in self.inputs)
-        output_expr = self.callback(*input_exprs)
-        return output_expr
+        il_exprs = self.callback(*input_exprs)
+        output_exprs: list[ExpressionIndex] = list()
+        #NOTE: this order of outputs only works if output operand is last
+        for input in self.inputs:
+            passtrough = input.get_passthrough()
+            if passtrough is not None: output_exprs.append(passtrough)
+        output_index = len(il_exprs)-len(self._outputs)+len(output_exprs)
+        output_exprs.extend(il_exprs[output_index:])
+        self._statements = il_exprs[:output_index]
+        self._output_exprs = tuple(output_exprs)
+        self._lifted = True
+
+    def register_output(self, output: 'OutputOperand'):
+        self._outputs.append(output)
 
     def store(self, allocator: TempAllocator, il: LowLevelILFunction):
         if self._stored: return
-        result = self.to_expr()
-        store_temp(allocator.alloc(), result, il) 
+        self._lift()
+        stored_exprs = list()
+        for output_expr in self._output_exprs:
+            temp_reg = allocator.alloc()
+            store_temp(temp_reg, output_expr, il)
+            stored_exprs.append(il.reg(ARCH_SIZE, temp_reg))
+        self._output_exprs = stored_exprs
         self._stored = True
 
-    def to_expr(self) -> ExpressionIndex:
-        if self._result is None:
-            self._result = self._to_expr()
-        return self._result
+    def get_statements(self) -> Iterable[ExpressionIndex]:
+        self._lift()
+        return self._statements
+
+    def get(self, output: 'OutputOperand') -> ExpressionIndex:
+        if output not in self._outputs:
+            raise ValueError('requested output needs to be registered')
+        self._lift()
+        return self._output_exprs[self._outputs.index(output)]
+    
+    def has_outputs(self) -> bool:
+        return len(self._outputs) > 0
 
 class OutputOperand:
     def __init__(self, src:Operand, operation: Operation) -> None:
         self.src = src
         self.operation = operation
+        if self._is_writing():
+            operation.register_output(self)
+
+    def _is_writing(self) -> bool:
+        match self.src:
+            case MemoryOperand(mode, _):
+                if mode in (AddressingMode.NEG_OFFSET, AddressingMode.POS_OFFSET):
+                    return False
+        return True
 
     def write(self, il:LowLevelILFunction):
+        if not self._is_writing(): return
         match self.src:
             case RegisterOperand(reg):
-                value = self.operation.to_expr()
+                value = self.operation.get(self)
                 il.append(il.set_reg(ARCH_SIZE, RegisterName(reg.name), value))
+            case MemoryOperand(_, base, _, _):
+                value = self.operation.get(self)
+                il.append(il.set_reg(ARCH_SIZE, RegisterName(base.name), value))
 
 class LiftInstruction:
     def __init__(self, src: Instruction, il: LowLevelILFunction) -> None:
@@ -582,7 +660,15 @@ class LiftInstruction:
             return
         
         for operand in src.operands:
-            if operand.access_info.rw in (RW.none, RW.read, RW.read_write):
+            if isinstance(operand, MemoryOperand):
+                # Access info for memory operands documents memory access.
+                # Here, register access is relevant, which is RW.
+                input = InputOperand(operand, il)
+                # Register access is in first cycle.
+                # Memory access is in third cycle, but may be lifted without delay.
+                self._reads.append((0, input))
+                self.inputs.append(input)
+            elif operand.access_info.rw in (RW.none, RW.read, RW.read_write):
                 input = InputOperand(operand, il)
                 if operand.access_info.low_last:
                     self._reads.append((operand.access_info.low_last-1, input))
@@ -592,15 +678,19 @@ class LiftInstruction:
         self.lift_cycle = max(map(lambda c: c[0], self._reads))
         self.operation = Operation(self.inputs, get_add_cb(il))
         for operand in src.operands:
-            if operand.access_info.rw in (RW.write, RW.read_write):
+            if isinstance(operand, MemoryOperand):
+                output = OutputOperand(operand, self.operation)
+                # Optional address write is in first cycle.
+                self._writes.append((0, output))
+            elif operand.access_info.rw in (RW.write, RW.read_write):
                 self.output = OutputOperand(operand, self.operation)
-                self.operation.has_output = True
                 if operand.access_info.low_first:
                     self._writes.append((operand.access_info.low_first-1, self.output))
                 if operand.access_info.high_first:
                     self._writes.append((operand.access_info.high_first-1, self.output))
 
     def is_first(self) -> bool:
+        # For load/store in same cycle, load occurs first.
         return self.src.opcode.lower().startswith('ld')
 
     def get_reads(self) -> list[tuple[int, InputOperand]]:
@@ -628,10 +718,10 @@ def lift_ep(ctx: LiftingContextAlt, packet: list[Instruction]):
     for input in ctx.read_queue.dequeue():
         input.read(allocator)
     for operation in ctx.op_queue.dequeue():
-        if operation.has_output:
+        for statement in operation.get_statements():
+            ctx.il.append(statement)
+        if operation.has_outputs():
             operation.store(ctx.temp_alloc, ctx.il)
-        else:
-            ctx.il.append(operation.to_expr())
     for output in ctx.write_queue.dequeue():
         output.write(ctx.il)
 
