@@ -461,6 +461,12 @@ def _get_bin_op_cb(il: LowLevelILFunction, op):
 def get_add_cb(il: LowLevelILFunction):
     return _get_bin_op_cb(il, il.add)
 
+def get_stw_cb(il: LowLevelILFunction):
+    def __lift(value: ExpressionIndex, address: ExpressionIndex) -> Sequence[ExpressionIndex]:
+        stmt = il.store(ARCH_SIZE, address, value)
+        return (stmt,)
+    return __lift
+
 def get_unimplemented_cb(il: LowLevelILFunction):
     def __lift(): return (il.unimplemented(),)
     return __lift
@@ -469,6 +475,7 @@ _lifting_cb_type = Callable[[ExpressionIndex, ExpressionIndex], Sequence[Express
 _lifting_gen_type = Callable[[LowLevelILFunction], _lifting_cb_type]
 OPCODE_CALLBACKS: dict[str, _lifting_gen_type] = {
     'add': get_add_cb,
+    'stw': get_stw_cb,
 }
 
 class LiftingQueue[T]:
@@ -676,7 +683,7 @@ class LiftInstruction:
                     self._reads.append((operand.access_info.high_last-1, input))
                 self.inputs.append(input)
         self.lift_cycle = max(map(lambda c: c[0], self._reads))
-        self.operation = Operation(self.inputs, get_add_cb(il))
+        self.operation = Operation(self.inputs, OPCODE_CALLBACKS[src.opcode](il))
         for operand in src.operands:
             if isinstance(operand, MemoryOperand):
                 output = OutputOperand(operand, self.operation)
