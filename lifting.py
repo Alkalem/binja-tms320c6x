@@ -333,7 +333,7 @@ def lift_il(arch, data:bytes, addr:int, il: LowLevelILFunction):
     return lift_simple_packet(execution_packet, il)
 
 ALT_LIFTING_START = 0x1e18
-ALT_LIFTING_END = 0x1e20
+ALT_LIFTING_END = 0x1e30
 
 def gen_instructions(data:bytes, addr:int):
     offset = 0
@@ -476,6 +476,7 @@ _lifting_gen_type = Callable[[LowLevelILFunction], _lifting_cb_type]
 OPCODE_CALLBACKS: dict[str, _lifting_gen_type] = {
     'add': get_add_cb,
     'stw': get_stw_cb,
+    'addk': get_add_cb,
 }
 
 class LiftingQueue[T]:
