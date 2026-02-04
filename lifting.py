@@ -16,7 +16,7 @@
 
 from binaryninja.lowlevelil import LowLevelILFunction, ExpressionIndex, \
         LLIL_TEMP, LLIL_GET_TEMP_REG_INDEX
-from binaryninja.log import log_warn, log_info, log_debug
+from binaryninja.log import log_warn, log_info, log_debug, log_error
 
 from typing import List
 
@@ -333,7 +333,7 @@ def lift_il(arch, data:bytes, addr:int, il: LowLevelILFunction):
     return lift_simple_packet(execution_packet, il)
 
 ALT_LIFTING_START = 0x1e18
-ALT_LIFTING_END = 0x1e30
+ALT_LIFTING_END = 0x1e40
 
 def gen_instructions(data:bytes, addr:int):
     offset = 0
@@ -472,6 +472,12 @@ def _get_bin_op_cb(il: LowLevelILFunction, op):
 def get_add_cb(il: LowLevelILFunction):
     return _get_bin_op_cb(il, il.add)
 
+def get_ldw_cb(il: LowLevelILFunction):
+    def __lift(address: ExpressionIndex) -> Sequence[ExpressionIndex]:
+        expr = il.load(ARCH_SIZE, address)
+        return (expr,)
+    return __lift
+
 def get_stw_cb(il: LowLevelILFunction):
     def __lift(value: ExpressionIndex, address: ExpressionIndex) -> Sequence[ExpressionIndex]:
         stmt = il.store(ARCH_SIZE, address, value)
@@ -482,12 +488,16 @@ def get_unimplemented_cb(il: LowLevelILFunction):
     def __lift(): return (il.unimplemented(),)
     return __lift
 
-_lifting_cb_type = Callable[[ExpressionIndex, ExpressionIndex], Sequence[ExpressionIndex]]
-_lifting_gen_type = Callable[[LowLevelILFunction], _lifting_cb_type]
+_lifting_bin_type = Callable[[ExpressionIndex, ExpressionIndex], Sequence[ExpressionIndex]]
+_lifting_un_type = Callable[[ExpressionIndex], Sequence[ExpressionIndex]]
+_lifting_gen_type = Callable[[LowLevelILFunction], 
+        _lifting_bin_type | _lifting_un_type]
 OPCODE_CALLBACKS: dict[str, _lifting_gen_type] = {
     'add': get_add_cb,
-    'stw': get_stw_cb,
     'addk': get_add_cb,
+    'ldw': get_ldw_cb,
+    'nop': lambda il: (lambda *_: (il.nop(),)),
+    'stw': get_stw_cb,
 }
 
 class LiftingQueue[T]:
@@ -509,6 +519,9 @@ class LiftingQueue[T]:
             return deque()
         else:
             return self.cycle_queues.popleft()
+        
+    def __len__(self) -> int:
+        return len(self.cycle_queues)
 
 class InputOperand:
     def __init__(self, src: Operand, il: LowLevelILFunction) -> None:
@@ -711,7 +724,7 @@ class LiftInstruction:
                 if operand.access_info.high_last:
                     self._reads.append((operand.access_info.high_last-1, input))
                 self.inputs.append(input)
-        self.lift_cycle = max(map(lambda c: c[0], self._reads))
+        self.lift_cycle = max(map(lambda c: c[0], self._reads), default=0)
         self.operation = Operation(self.inputs, OPCODE_CALLBACKS[src.opcode](il))
         for operand in src.operands:
             if isinstance(operand, MemoryOperand):
@@ -738,9 +751,24 @@ class LiftInstruction:
     def get_writes(self) -> list[tuple[int, OutputOperand]]:
         return self._writes
 
+def _lift_cycle(ctx: LiftingContextAlt):
+    '''Translate one cycle of pipeline execution to IL'''
+    for input in ctx.read_queue.dequeue():
+        input.read(ctx.read_alloc)
+    for operation in ctx.op_queue.dequeue():
+        for statement in operation.get_statements():
+            ctx.il.append(statement)
+        if operation.has_outputs():
+            operation.store(ctx.read_alloc, ctx.il)
+    for output in ctx.write_queue.dequeue():
+        output.write(ctx.il, ctx.temp_alloc)
+
+def _drain_queues(ctx: LiftingContextAlt):
+    while any(map(lambda q: len(q) > 0, (ctx.read_queue, ctx.op_queue, ctx.write_queue))):
+        _lift_cycle(ctx)
+
 def lift_ep(ctx: LiftingContextAlt, packet: list[Instruction]):
-    allocator = ctx.read_alloc
-    
+    ctx.il.current_address = packet[0].address  
     # 1. Convert instructions to helper objects for lifting
     lift_packet = [LiftInstruction(instr, ctx.il) for instr in packet]
 
@@ -750,16 +778,10 @@ def lift_ep(ctx: LiftingContextAlt, packet: list[Instruction]):
         ctx.op_queue.enqueue([lift_instr.get_operation()], lift_instr.is_first())
         ctx.write_queue.enqueue(lift_instr.get_writes())
     
-    # 3. Translate one cycle of pipeline execution to IL
-    for input in ctx.read_queue.dequeue():
-        input.read(allocator)
-    for operation in ctx.op_queue.dequeue():
-        for statement in operation.get_statements():
-            ctx.il.append(statement)
-        if operation.has_outputs():
-            operation.store(allocator, ctx.il)
-    for output in ctx.write_queue.dequeue():
-        output.write(ctx.il, ctx.temp_alloc)
+    # 3. Translate cycles to IL, multiple in case of multi-cycle NOP
+    delay = max(map(get_delay_consumption, packet))
+    for _ in range(delay):
+        _lift_cycle(ctx)
 
 def lift_instructions(arch, il: LowLevelILFunction , stream, end: Optional[int]=None):
     ctx = LiftingContextAlt(arch, il, LiftingSettings(False))
@@ -769,7 +791,8 @@ def lift_instructions(arch, il: LowLevelILFunction , stream, end: Optional[int]=
         if len(packet) == 0: break
         lift_ep(ctx, packet)
         lifted += sum(map(lambda instr: instr.size, packet))
-        if end and packet[-1].address + packet[-1].size >= end: break
+        if end and packet[-1].address + packet[-1].size > end: break
+    _drain_queues(ctx)
     return lifted
 
 # def prepare_ep_lifting(packet: List[Instruction]) -> LiftPacket:
