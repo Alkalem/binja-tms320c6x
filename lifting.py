@@ -333,7 +333,7 @@ def lift_il(arch, data:bytes, addr:int, il: LowLevelILFunction):
     return lift_simple_packet(execution_packet, il)
 
 ALT_LIFTING_START = 0x1e18
-ALT_LIFTING_END = 0x1e40
+ALT_LIFTING_END = 0x1e58
 
 def gen_instructions(data:bytes, addr:int):
     offset = 0
@@ -496,6 +496,8 @@ OPCODE_CALLBACKS: dict[str, _lifting_gen_type] = {
     'add': get_add_cb,
     'addk': get_add_cb,
     'ldw': get_ldw_cb,
+    'mvk': lambda _: (lambda inp: (inp,)),
+    'mvkh': lambda _: (lambda inp: (inp,)),
     'nop': lambda il: (lambda *_: (il.nop(),)),
     'stw': get_stw_cb,
 }
@@ -662,9 +664,10 @@ class Operation:
         return len(self._outputs) > 0
 
 class OutputOperand:
-    def __init__(self, src:Operand, operation: Operation) -> None:
+    def __init__(self, src:Operand, operation: Operation, instr: Instruction) -> None:
         self.src = src
         self.operation = operation
+        self.instruction = instr
         self._high = False
         if self._is_writing():
             operation.register_output(self)
@@ -682,7 +685,10 @@ class OutputOperand:
         done = True
         match self.src:
             case RegisterOperand(reg):
-                il.append(il.set_reg(ARCH_SIZE, RegisterName(reg.name), value))
+                if self.instruction.opcode in ('mvkh', 'mvklh'):
+                    il.append(il.set_reg(HW_SIZE, RegisterName(reg.name+'H'), value))
+                else:
+                    il.append(il.set_reg(ARCH_SIZE, RegisterName(reg.name), value))
             case RegisterPairOperand(high, low):
                 if self._high:
                     il.append(il.set_reg(ARCH_SIZE, RegisterName(high.name), value))
@@ -728,11 +734,11 @@ class LiftInstruction:
         self.operation = Operation(self.inputs, OPCODE_CALLBACKS[src.opcode](il))
         for operand in src.operands:
             if isinstance(operand, MemoryOperand):
-                output = OutputOperand(operand, self.operation)
+                output = OutputOperand(operand, self.operation, src)
                 # Optional address write is in first cycle.
                 self._writes.append((0, output))
             elif operand.access_info.rw in (RW.write, RW.read_write):
-                self.output = OutputOperand(operand, self.operation)
+                self.output = OutputOperand(operand, self.operation, src)
                 if operand.access_info.low_first:
                     self._writes.append((operand.access_info.low_first-1, self.output))
                 if operand.access_info.high_first:

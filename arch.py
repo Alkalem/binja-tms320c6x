@@ -17,6 +17,7 @@
 from binaryninja.architecture import Architecture, RegisterInfo, \
     RegisterName, BasicBlockAnalysisContext, InstructionTextToken
 from binaryninja.callingconvention import CallingConvention
+from binaryninja.enums import ImplicitRegisterExtend
 from binaryninja.function import Function
 from binaryninja.log import log_warn
 
@@ -59,8 +60,8 @@ class TMS320C67x(TMS320C6xBaseArch):
         if reg & 16: continue # skip high registers
         _name = RegisterName(reg.name)
         regs[_name] = RegisterInfo(_name, ARCH_SIZE)
-        _name = RegisterName(reg.name+'H')
-        regs[_name] = RegisterInfo(_name, ARCH_SIZE//2, ARCH_SIZE//2)
+        _nameH = RegisterName(reg.name+'H')
+        regs[_nameH] = RegisterInfo(_name, ARCH_SIZE//2, ARCH_SIZE//2)
     for reg in ControlRegister:
         if reg.isa not in ISA.C67XP: continue
         _name = RegisterName(reg.name)
@@ -114,8 +115,8 @@ class TMS320C6x(TMS320C6xBaseArch):
     for reg in Register:
         _name = RegisterName(reg.name)
         regs[_name] = RegisterInfo(_name, ARCH_SIZE)
-        _name = RegisterName(reg.name+'H')
-        regs[_name] = RegisterInfo(_name, ARCH_SIZE//2, ARCH_SIZE//2)
+        _nameH = RegisterName(reg.name+'H')
+        regs[_nameH] = RegisterInfo(_name, ARCH_SIZE//2, ARCH_SIZE//2)
     for reg in ControlRegister:
         _name = RegisterName(reg.name)
         regs[_name] = RegisterInfo(_name, ARCH_SIZE)
