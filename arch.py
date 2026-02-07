@@ -27,7 +27,7 @@ from .disassembler.types import Register, ControlRegister, ISA
 from .analysis import analyze_basic_blocks
 from .instruction import Disassembler, gen_tokens, gen_parallel_fallthrough
 from .constants import *
-from .lifting import lift_il
+from .lifting import lift_instructions
 
 
 class TMS320C6xBaseArch(Architecture):
@@ -45,7 +45,8 @@ class TMS320C6xBaseArch(Architecture):
         return self.disasm.info(data, addr)
     
     def get_instruction_low_level_il(self, data, addr, il):
-        return lift_il(self, data, addr, il)
+        stream = self.disasm.disasm(data, addr)
+        return lift_instructions(self, il, stream)
 
     def analyze_basic_blocks(self, func: Function, 
             context: BasicBlockAnalysisContext) -> None:
