@@ -69,6 +69,7 @@ class TMS320C67x(TMS320C6xBaseArch):
         system_regs.append(_name)
 
     stack_pointer = 'B15'
+    link_reg = 'B3'
     
     disasm = Disassembler(isa=ISA.C67XP) 
 
@@ -123,6 +124,7 @@ class TMS320C6x(TMS320C6xBaseArch):
         system_regs.append(_name)
 
     stack_pointer = 'B15'
+    link_reg = 'B3'
 
     disasm = Disassembler(isa=ISA.C674X)
 

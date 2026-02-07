@@ -333,7 +333,7 @@ def lift_il(arch, data:bytes, addr:int, il: LowLevelILFunction):
     return lift_simple_packet(execution_packet, il)
 
 ALT_LIFTING_START = 0x1e18
-ALT_LIFTING_END = 0x1e58
+ALT_LIFTING_END = 0x1e90
 
 def gen_instructions(data:bytes, addr:int):
     offset = 0
@@ -359,14 +359,16 @@ def get_execution_packet(disasm:Disassembler, stream) -> List[Instruction]:
 ## WIP: unified parallel and delayed lifting skeleton
 
 from binaryninja.architecture import RegisterName
+from binaryninja.commonil import ILSourceLocation
 from binaryninja.lowlevelil import ILRegister, LowLevelILReg, LLIL_REG_IS_TEMP
+from binaryninja.variable import PossibleValueSet, ValueRange
 
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Optional, Sequence, Iterable
 
-from .disassembler.types import RW, FuncUnitsOperand, ControlRegisterOperand, RegisterPairOperand
+from .disassembler.types import RW, FuncUnitsOperand, ControlRegisterOperand, RegisterPairOperand, ControlRegister
 
 @dataclass(frozen=True)
 class LiftingSettings:
@@ -495,6 +497,7 @@ _lifting_gen_type = Callable[[LowLevelILFunction],
 OPCODE_CALLBACKS: dict[str, _lifting_gen_type] = {
     'add': get_add_cb,
     'addk': get_add_cb,
+    'b': lambda _: (lambda inp: (inp,)),
     'ldw': get_ldw_cb,
     'mvk': lambda _: (lambda inp: (inp,)),
     'mvkh': lambda _: (lambda inp: (inp,)),
@@ -698,6 +701,15 @@ class OutputOperand:
                     done = False
             case MemoryOperand(_, base, _, _):
                 il.append(il.set_reg(ARCH_SIZE, RegisterName(base.name), value))
+            case ControlRegisterOperand(reg):
+                if reg == ControlRegister.PCE1:
+                    #HACK: write access is not allowed, used to model jumps
+                    branch = il.call
+                    if str(self.instruction.operands[0]) == 'B3':
+                        branch = il.ret
+                    il.append(branch(value))
+                else:
+                    raise NotImplementedError('control register writes')
         if done and is_temp_reg(value, il):
             allocator.free(il.get_expr(value).src) # type: ignore
 
@@ -743,6 +755,10 @@ class LiftInstruction:
                     self._writes.append((operand.access_info.low_first-1, self.output))
                 if operand.access_info.high_first:
                     self._writes.append((operand.access_info.high_first-1, self.output))
+        if _is_branch(src):
+            pc_output = OutputOperand(ControlRegisterOperand(ControlRegister.PCE1), self.operation, src)
+            # branches don't work differently, but their delay is similar
+            self._writes.append((5, pc_output))
 
     def is_first(self) -> bool:
         # For load/store in same cycle, load occurs first.
@@ -756,6 +772,9 @@ class LiftInstruction:
     
     def get_writes(self) -> list[tuple[int, OutputOperand]]:
         return self._writes
+    
+def _is_branch(instr: Instruction) -> bool:
+    return instr.opcode in ('b', 'bpos', 'bdec', 'callp')
 
 def _lift_cycle(ctx: LiftingContextAlt):
     '''Translate one cycle of pipeline execution to IL'''
@@ -782,7 +801,8 @@ def lift_ep(ctx: LiftingContextAlt, packet: list[Instruction]):
     for lift_instr in lift_packet:
         ctx.read_queue.enqueue(lift_instr.get_reads())
         ctx.op_queue.enqueue([lift_instr.get_operation()], lift_instr.is_first())
-        ctx.write_queue.enqueue(lift_instr.get_writes())
+        #HACK: front=True is workaround for branch lifting
+        ctx.write_queue.enqueue(lift_instr.get_writes(), front=True)
     
     # 3. Translate cycles to IL, multiple in case of multi-cycle NOP
     delay = max(map(get_delay_consumption, packet))
