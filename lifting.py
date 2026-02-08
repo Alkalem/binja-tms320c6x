@@ -567,10 +567,14 @@ def lift_function(arch: TMS320C6xBaseArch, function: LowLevelILFunction, context
 
         end_instruction_count = len(function)
         function.clear_indirect_branches()
+        segment = unwrap(bv.get_segment_at(block.end - 1))
 
         if begin_instruction_count == end_instruction_count:
             function.append(function.undefined(loc=_addr2loc(addr)))
             logger.log_debug(f'Basic block must have instructions to be valid, at {block.start:08x}')
+        elif ((len(block.outgoing_edges) == 0 and not block.can_exit and not block.fallthrough_to_function) or block.end == segment.end):
+            #HACK: workaround to stop lifting 
+            function.append(function.no_ret(loc=_addr2loc(block.end)))
         else:
             exit_label = function.get_label_for_address(arch, block.end)
             if exit_label:
