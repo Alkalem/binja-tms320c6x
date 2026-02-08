@@ -14,15 +14,21 @@
 # You should have received a copy of the GNU General Public License along with
 # this program. If not, see <http://www.gnu.org/licenses/>.
 
+from __future__ import annotations
+
+from binaryninja.function import ArchAndAddr
 from binaryninja.lowlevelil import LowLevelILFunction, ExpressionIndex, \
         LLIL_TEMP, LLIL_GET_TEMP_REG_INDEX
 from binaryninja.log import log_warn, log_info, log_debug, log_error
 
-from typing import List
+from typing import List, TYPE_CHECKING
 
-from .constants import ARCH_SIZE, HW_SIZE, DW_SIZE, INSTRUCTION_DELAY
+if TYPE_CHECKING:
+    from .arch import TMS320C6xBaseArch
+from .arch import FunctionLifterContext
+from .constants import ARCH_SIZE, HW_SIZE, DW_SIZE, INSTRUCTION_DELAY, FP_SIZE
 from .instruction import Disassembler
-from .util import get_delay_consumption
+from .util import get_delay_consumption, unwrap
 from .disassembler.types import Instruction, Operand, ImmediateOperand, \
         RegisterOperand, MemoryOperand, Register, AddressingMode
 
@@ -496,14 +502,69 @@ def _next_execution_packet(stream: Generator[Instruction, None, None], is_header
             break # In versions that are not header-based, EPs cannot span FPs.
     return execution_packet
 
-# def prepare_ep_lifting(packet: List[Instruction]) -> LiftPacket:
+def lift_basic_block(block: BasicBlock, ctx: LiftingContext) -> int:
+    return 0
+
+def lift_function(arch: TMS320C6xBaseArch, function: LowLevelILFunction, context: FunctionLifterContext) -> bool:
+    settings = LiftingSettings(header_based=True, simplify=False)
+
+    logger = context._logger
+    bv = unwrap(function.view)
+
+    for block in context.blocks:
+        function.set_current_source_block(block)
+        
+        context.prepare_block_translation(function, arch, block.start)
+        label = function.get_label_for_address(arch, block.start)
+        if label is not None:
+            function.mark_label(label)
+
+        begin_instruction_count = len(function)
+
+        # Generate IL for each instruction in the block
+        addr = block.start
+        while addr < block.end:
+            if bv.analysis_is_aborted:
+                return False
+            
+            location = ArchAndAddr(arch, addr)
+            function.set_current_address(addr, arch)
+            function.clear_indirect_branches()
+
+            opcode = block.get_instruction_data(addr)
+            if len(opcode) == 0:
+                opcode = bv.read(addr, block.end - addr)
+            if len(opcode) == 0:
+                function.append(function.undefined())
+                logger.log_debug(f'Instruction data not found at {addr:08x}')
+                break
+            if settings.header_based:
+                opcode_end = addr + len(opcode)
+                remaining_fp_bytes = (-opcode_end) & FP_SIZE
+                opcode += bv.read(opcode_end, remaining_fp_bytes)
+
+            stream = arch.disasm.disasm(opcode, addr)
+            lifted_bytes = lift_instructions(arch, function, stream, end=block.end)
+
+            if lifted_bytes is None or lifted_bytes <= 0:
+                function.append(function.undefined())
+                logger.log_debug(f'Invalid instruction at {addr:08x}')
+                break
+            addr += lifted_bytes
+
+        function.clear_indirect_branches()
+        
+    if len(function) == 0:
+        # If no instructions, make it undefined
+        function.append(function.undefined())
+        logger.log_debug(f'No instructions found at {unwrap(function.source_function).start:08x}')
+
+    function.finalize()
+    return True
+
 
 # def lift_basic_block(block: BasicBlock, func: LowLevelILFunction) -> BlockLiftingResult:
 # BlockLiftingResult ~= bool, pending instructions
-
-# def lift_instruction(arch, func: LowLevelILFunction) -> int:
-# Lift instruction based until function-based lifting is supported and implemented.
-# Should lift entire EPs if possible, may lift until end of block to translate delays correctly.
 
 # def lift_function(arch, func: LowLevelILFunction, context: FunctionLifterContext) -> bool:
 # Lift entire function after analysis, by lifting basic blocks, their delayed instructions, and their branches.

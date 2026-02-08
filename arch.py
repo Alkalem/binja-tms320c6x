@@ -14,12 +14,12 @@
 # You should have received a copy of the GNU General Public License along with
 # this program. If not, see <http://www.gnu.org/licenses/>.
 
-from binaryninja.architecture import Architecture, RegisterInfo, \
-    RegisterName, BasicBlockAnalysisContext, InstructionTextToken
+from binaryninja.architecture import Architecture, RegisterInfo, RegisterName, BasicBlockAnalysisContext, FunctionLifterContext, InstructionTextToken
 from binaryninja.callingconvention import CallingConvention
 from binaryninja.enums import ImplicitRegisterExtend
 from binaryninja.function import Function
 from binaryninja.log import log_warn
+from binaryninja.lowlevelil import LowLevelILFunction
 
 from typing import Any, Optional
 
@@ -27,7 +27,7 @@ from .disassembler.types import Register, ControlRegister, ISA
 from .analysis import analyze_basic_blocks
 from .instruction import Disassembler, gen_tokens, gen_parallel_fallthrough
 from .constants import *
-from .lifting import lift_instructions
+from .lifting import lift_instructions, lift_function
 
 
 class TMS320C6xBaseArch(Architecture):
@@ -164,16 +164,6 @@ class TMS320C6x(TMS320C6xBaseArch):
         # Cannot reliably provide tokens without context, abort instead.
         return None
 
-    def get_instruction_low_level_il(self, data, addr, il):
-        # data, _ = self.__header_workaround(data, addr)
-        instruction = self.disasm.decode(data, addr)
-        il.append(il.unimplemented())
-        return instruction.size
-    
-    def __header_workaround(self, data, addr):
-        words = len(data)//ARCH_SIZE
-        if (len(data) != self.max_instr_length 
-                and (addr + len(data)) % FP_SIZE):
-            fill_words = 8 - ((words + (addr//ARCH_SIZE)) % 8) 
-            return data[:-ARCH_SIZE] + b'\x00'*(ARCH_SIZE*fill_words) + data[-ARCH_SIZE:], words - 1
-        return data, words
+    def lift_function(self, func: LowLevelILFunction,
+                      context: FunctionLifterContext) -> bool:
+        return lift_function(self, func, context)
