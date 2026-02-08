@@ -128,15 +128,20 @@ def _get_bin_op_cb(il: LowLevelILFunction, op, loc: ILSourceLocation):
 def get_add_cb(il: LowLevelILFunction, loc: ILSourceLocation):
     return _get_bin_op_cb(il, il.add, loc)
 
-def get_ldw_cb(il: LowLevelILFunction, loc: ILSourceLocation):
+def get_load_cb(il: LowLevelILFunction, loc: ILSourceLocation, size=ARCH_SIZE, signed=True):
     def __lift(address: ExpressionIndex) -> Sequence[ExpressionIndex]:
-        expr = il.load(ARCH_SIZE, address, loc=loc)
+        expr = il.load(size, address, loc=loc)
+        if size < ARCH_SIZE:
+            if signed:
+                expr = il.sign_extend(ARCH_SIZE, expr, loc=loc)
+            else:
+                expr = il.zero_extend(ARCH_SIZE, expr, loc=loc)
         return (expr,)
     return __lift
 
-def get_stw_cb(il: LowLevelILFunction, loc: ILSourceLocation):
+def get_store_cb(il: LowLevelILFunction, loc: ILSourceLocation, size=ARCH_SIZE):
     def __lift(value: ExpressionIndex, address: ExpressionIndex) -> Sequence[ExpressionIndex]:
-        stmt = il.store(ARCH_SIZE, address, value, loc=loc)
+        stmt = il.store(size, address, value, loc=loc)
         return (stmt,)
     return __lift
 
@@ -152,11 +157,24 @@ OPCODE_CALLBACKS: dict[str, _lifting_gen_type] = {
     'add': get_add_cb,
     'addk': get_add_cb,
     'b': lambda *_: (lambda inp: (inp,)),
-    'ldw': get_ldw_cb,
+    'ldb': lambda il, loc: get_load_cb(il, loc, 1),
+    'ldbu': lambda il, loc: get_load_cb(il, loc, 1, False),
+    'ldh': lambda il, loc: get_load_cb(il, loc, HW_SIZE),
+    'ldhu': lambda il, loc: get_load_cb(il, loc, HW_SIZE, False),
+    'ldndw': lambda il, loc: get_load_cb(il, loc, DW_SIZE),
+    'ldnw': get_load_cb,
+    'ldw': get_load_cb,
+    'mv': lambda *_: (lambda inp: (inp,)),
     'mvk': lambda *_: (lambda inp: (inp,)),
     'mvkh': lambda *_: (lambda inp: (inp,)),
     'nop': lambda il, loc: (lambda *_: (il.nop(loc=loc),)),
-    'stw': get_stw_cb,
+    'or': lambda il, loc: _get_bin_op_cb(il, il.or_expr, loc),
+    'stb': lambda il, loc: get_store_cb(il, loc, 1),
+    'stdw': lambda il, loc: get_store_cb(il, loc, DW_SIZE),
+    'sth': lambda il, loc: get_store_cb(il, loc, HW_SIZE),
+    'stndw': lambda il, loc: get_store_cb(il, loc, DW_SIZE),
+    'stnw': get_store_cb,
+    'stw': get_store_cb,
 }
 
 class LiftingQueue[T]:
