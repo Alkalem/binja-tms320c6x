@@ -14,6 +14,8 @@
 # You should have received a copy of the GNU General Public License along with
 # this program. If not, see <http://www.gnu.org/licenses/>.
 
+from typing import Optional
+
 from .disassembler.types import Instruction, ImmediateOperand
 
 def get_delay_consumption(instr:Instruction):
@@ -39,3 +41,12 @@ def get_delay_consumption(instr:Instruction):
             and instr.header.protected_loads):
         delay_slots += 4 # NOP cycles after instruction
     return delay_slots
+
+class UnwrapError(ValueError):
+    '''Unwrapping of None value.'''
+    pass
+
+def unwrap[T](obj: Optional[T]) -> T:
+    if obj is None: raise UnwrapError
+    return obj
+
