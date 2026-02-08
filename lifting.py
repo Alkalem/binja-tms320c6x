@@ -152,7 +152,7 @@ def get_stw_cb(il: LowLevelILFunction, loc: ILSourceLocation):
     return __lift
 
 def get_unimplemented_cb(il: LowLevelILFunction, loc: ILSourceLocation):
-    def __lift(): return (il.unimplemented(),)
+    def __lift(): return (il.unimplemented(loc=loc),)
     return __lift
 
 _lifting_bin_type = Callable[[ExpressionIndex, ExpressionIndex], Sequence[ExpressionIndex]]
