@@ -477,7 +477,7 @@ def lift_instructions(arch, il: LowLevelILFunction , stream: Generator[Instructi
         if len(packet) == 0: break
         lift_ep(ctx, packet)
         lifted += sum(map(lambda instr: instr.size, packet))
-        if end and packet[-1].address + packet[-1].size > end: break
+        if end and packet[-1].address + packet[-1].size >= end: break
     _drain_queues(ctx)
     return lifted
 
@@ -530,7 +530,7 @@ def lift_function(arch: TMS320C6xBaseArch, function: LowLevelILFunction, context
             if len(opcode) == 0:
                 opcode = bv.read(addr, block.end - addr)
             if len(opcode) == 0:
-                function.append(function.undefined())
+                function.append(function.undefined(loc=_addr2loc(addr)))
                 logger.log_debug(f'Instruction data not found at {addr:08x}')
                 break
             if settings.header_based:
@@ -542,13 +542,24 @@ def lift_function(arch: TMS320C6xBaseArch, function: LowLevelILFunction, context
             lifted_bytes = lift_instructions(arch, function, stream, end=block.end)
 
             if lifted_bytes is None or lifted_bytes <= 0:
-                function.append(function.undefined())
+                function.append(function.undefined(loc=_addr2loc(addr)))
                 logger.log_debug(f'Invalid instruction at {addr:08x}')
                 break
             addr += lifted_bytes
 
+        end_instruction_count = len(function)
         function.clear_indirect_branches()
-        
+
+        if begin_instruction_count == end_instruction_count:
+            function.append(function.undefined(loc=_addr2loc(addr)))
+            logger.log_debug(f'Basic block must have instructions to be valid, at {block.start:08x}')
+        else:
+            exit_label = function.get_label_for_address(arch, block.end)
+            if exit_label:
+                function.append(function.goto(exit_label, loc=_addr2loc(block.end)))
+            else:
+                function.append(function.jump(function.const(ARCH_SIZE, block.end), loc=_addr2loc(block.end)))
+
     if len(function) == 0:
         # If no instructions, make it undefined
         function.append(function.undefined())
