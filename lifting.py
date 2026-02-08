@@ -16,13 +16,18 @@
 
 from __future__ import annotations
 
+from binaryninja.architecture import RegisterName
+from binaryninja.basicblock import BasicBlock
 from binaryninja.commonil import ILSourceLocation
 from binaryninja.function import ArchAndAddr
-from binaryninja.lowlevelil import LowLevelILFunction, ExpressionIndex, \
-        LLIL_TEMP, LLIL_GET_TEMP_REG_INDEX
+from binaryninja.lowlevelil import ILRegister, LowLevelILReg, LowLevelILFunction, ExpressionIndex, LLIL_REG_IS_TEMP, LLIL_TEMP, LLIL_GET_TEMP_REG_INDEX
 from binaryninja.log import log_warn, log_info, log_debug, log_error
+from binaryninja.variable import PossibleValueSet, ValueRange
 
-from typing import List, TYPE_CHECKING
+from collections import deque
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any, Optional, Sequence, Iterable, Generator, List, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .arch import TMS320C6xBaseArch
@@ -30,8 +35,7 @@ from .arch import FunctionLifterContext
 from .constants import ARCH_SIZE, HW_SIZE, DW_SIZE, INSTRUCTION_DELAY, FP_SIZE
 from .instruction import Disassembler
 from .util import get_delay_consumption, unwrap
-from .disassembler.types import Instruction, Operand, ImmediateOperand, \
-        RegisterOperand, MemoryOperand, Register, AddressingMode
+from .disassembler.types import Instruction, Operand, ImmediateOperand, RegisterOperand, MemoryOperand, Register, AddressingMode, RW, FuncUnitsOperand, ControlRegisterOperand, RegisterPairOperand, ControlRegister
 
 
 #TODO: lift conditional execution
@@ -41,29 +45,6 @@ from .disassembler.types import Instruction, Operand, ImmediateOperand, \
 def store_temp(reg_id, value, il: LowLevelILFunction, loc=None):
     tmp = LLIL_TEMP(reg_id)
     il.append(il.set_reg(ARCH_SIZE, tmp, value, loc=loc))
-
-def get_temp(reg_id, il):
-    tmp = LLIL_TEMP(reg_id)
-    return il.reg(ARCH_SIZE, tmp)
-
-
-## WIP: unified parallel and delayed lifting skeleton
-
-from binaryninja.architecture import RegisterName
-from binaryninja.lowlevelil import ILRegister, LowLevelILReg, LLIL_REG_IS_TEMP
-from binaryninja.variable import PossibleValueSet, ValueRange
-
-from collections import deque
-from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any, Optional, Sequence, Iterable, Generator
-
-from .disassembler.types import RW, FuncUnitsOperand, ControlRegisterOperand, RegisterPairOperand, ControlRegister
-
-@dataclass(frozen=True)
-class LiftingSettings:
-    header_based: bool
-    simplify: bool = False
 
 class TempAllocator:
     def __init__(self, arch) -> None:
@@ -117,6 +98,14 @@ def is_temp_reg(expr: ExpressionIndex, il: LowLevelILFunction) -> bool:
     if isinstance(instr, LowLevelILReg) and isinstance(instr.src, ILRegister):
         return LLIL_REG_IS_TEMP(instr.src)
     return False
+
+
+## WIP: unified parallel and delayed lifting skeleton
+
+@dataclass(frozen=True)
+class LiftingSettings:
+    header_based: bool
+    simplify: bool = False
 
 class LiftingContext:
     def __init__(self, arch, il: LowLevelILFunction, settings: LiftingSettings) -> None:
