@@ -162,6 +162,7 @@ OPCODE_CALLBACKS: dict[str, _lifting_gen_type] = {
     'ldh': lambda il, loc: get_load_cb(il, loc, HW_SIZE),
     'ldhu': lambda il, loc: get_load_cb(il, loc, HW_SIZE, False),
     'ldndw': lambda il, loc: get_load_cb(il, loc, DW_SIZE),
+    'lddw': lambda il, loc: get_load_cb(il, loc, DW_SIZE),
     'ldnw': get_load_cb,
     'ldw': get_load_cb,
     'mv': lambda *_: (lambda inp: (inp,)),
