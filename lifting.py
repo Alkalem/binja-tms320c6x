@@ -111,7 +111,7 @@ class LiftingContext:
     def __init__(self, arch, il: LowLevelILFunction, settings: LiftingSettings) -> None:
         self.arch = arch
         self.il = il
-        self.setting = settings
+        self.settings = settings
         self.read_queue:LiftingQueue[InputOperand] = LiftingQueue(32)
         self.op_queue:LiftingQueue[Operation] = LiftingQueue(32)
         self.write_queue:LiftingQueue[OutputOperand] = LiftingQueue(32)
@@ -473,7 +473,8 @@ def _drain_queues(ctx: LiftingContext):
 
 def lift_ep(ctx: LiftingContext, packet: list[Instruction]):
     # 1. Convert instructions to helper objects for lifting
-    lift_packet = [LiftInstruction(instr, ctx.il) for instr in packet]
+    lift_packet = [LiftInstruction(instr, ctx.il) for instr in packet
+            if not instr.is_fp_header()] # do not lift headers
 
     # 2. Enqueue parts of the EPs instructions in lifting queues
     for lift_instr in lift_packet:
@@ -487,11 +488,12 @@ def lift_ep(ctx: LiftingContext, packet: list[Instruction]):
     for _ in range(delay):
         _lift_cycle(ctx)
 
-def lift_instructions(arch, il: LowLevelILFunction , stream: Generator[Instruction, None, None], end: Optional[int]=None):
-    ctx = LiftingContext(arch, il, LiftingSettings(False))
+def lift_instructions(arch, il: LowLevelILFunction , stream: Generator[Instruction, None, None], end: Optional[int]=None, ctx: Optional[LiftingContext]=None):
+    if ctx is None:
+        ctx = LiftingContext(arch, il, LiftingSettings(False))
     lifted = 0
     while True:
-        packet = _next_execution_packet(stream)
+        packet = _next_execution_packet(stream, ctx.settings.header_based)
         if len(packet) == 0: break
         lift_ep(ctx, packet)
         lifted += sum(map(lambda instr: instr.size, packet))
@@ -508,8 +510,8 @@ def _next_execution_packet(stream: Generator[Instruction, None, None], is_header
             break
         #TODO: either break on error or skip instruction based on setting
         if instr.is_invalid(): break
-        if instr.is_fp_header(): continue # do not need to lift header
         execution_packet.append(instr)
+        if instr.is_fp_header(): continue # add header but ignore it later
         if not instr.parallel: break
         if not is_header_based and ((instr.address+4) % (ARCH_SIZE * 8)) == 0:
             break # In versions that are not header-based, EPs cannot span FPs.
@@ -520,6 +522,7 @@ def lift_basic_block(block: BasicBlock, ctx: LiftingContext) -> int:
 
 def lift_function(arch: TMS320C6xBaseArch, function: LowLevelILFunction, context: FunctionLifterContext) -> bool:
     settings = LiftingSettings(header_based=True, simplify=False)
+    ctx = LiftingContext(arch, function, settings)
 
     logger = context._logger
     bv = unwrap(function.view)
@@ -553,11 +556,12 @@ def lift_function(arch: TMS320C6xBaseArch, function: LowLevelILFunction, context
                 break
             if settings.header_based:
                 opcode_end = addr + len(opcode)
-                remaining_fp_bytes = (-opcode_end) & FP_SIZE
+                remaining_fp_bytes = (-opcode_end) % FP_SIZE
+                if remaining_fp_bytes: log_debug(f'Reading FP remainder at {opcode_end:08x}')
                 opcode += bv.read(opcode_end, remaining_fp_bytes)
 
             stream = arch.disasm.disasm(opcode, addr)
-            lifted_bytes = lift_instructions(arch, function, stream, end=block.end)
+            lifted_bytes = lift_instructions(arch, function, stream, end=block.end, ctx=ctx)
 
             if lifted_bytes is None or lifted_bytes <= 0:
                 function.append(function.undefined(loc=_addr2loc(addr)))
