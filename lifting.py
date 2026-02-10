@@ -112,6 +112,7 @@ class LiftingContext:
         self.arch = arch
         self.il = il
         self.settings = settings
+        self.cond_queue:LiftingQueue[RegisterHandle] = LiftingQueue(32)
         self.read_queue:LiftingQueue[InputOperand] = LiftingQueue(32)
         self.op_queue:LiftingQueue[Operation] = LiftingQueue(32)
         self.write_queue:LiftingQueue[OutputOperand] = LiftingQueue(32)
@@ -201,10 +202,31 @@ class LiftingQueue[T]:
     def __len__(self) -> int:
         return len(self.cycle_queues)
 
+class RegisterHandle:
+    def __init__(self, register: Register) -> None:
+        self.name = RegisterName(register.name)
+        self._is_read = False
+
+    def read(self, allocator: TempReadAllocator):
+        if self._is_read: return
+        self._allocator = allocator
+        self._handle = allocator.alloc(self.name)
+        self._is_read = True
+
+    def get(self) -> ILRegister:
+        assert self._is_read, 'must read register before usage'
+        return self._handle
+
+    def free(self):
+        if self._is_read:
+            self._allocator.free(self.name)
+        del self._handle
+        self._is_read = False
+
 class InputOperand:
-    def __init__(self, src: Operand, il: LowLevelILFunction, instr: Instruction) -> None:
+    def __init__(self, src: Operand, il: LowLevelILFunction, parent: LiftInstruction) -> None:
         self.src = src
-        self.loc = _addr2loc(instr.address)
+        self.parent = parent
         self.il = il
         self.handles:dict[RegisterName, ILRegister] = dict()
         self._is_read = False
@@ -217,52 +239,52 @@ class InputOperand:
         match self.src:
             case RegisterOperand(reg) | ControlRegisterOperand(reg):
                 reg_name = RegisterName(reg.name)
-                self.handles[reg_name] = allocator.alloc(reg_name, self.loc)
+                self.handles[reg_name] = allocator.alloc(reg_name, self.parent.loc)
             case RegisterPairOperand(high, low):
                 if self.low:
                     self._is_read = self.low = False
                     reg_name = RegisterName(low.name)
                 else:
                     reg_name = RegisterName(high.name)
-                self.handles[reg_name] = allocator.alloc(reg_name, self.loc)
+                self.handles[reg_name] = allocator.alloc(reg_name, self.parent.loc)
             case MemoryOperand(_, base, offset, _):
                 reg_name = RegisterName(base.name)
-                self.handles[reg_name] = allocator.alloc(reg_name, self.loc)
+                self.handles[reg_name] = allocator.alloc(reg_name, self.parent.loc)
                 if isinstance(offset, Register):
                     reg_name = RegisterName(offset.name)
-                    self.handles[reg_name] = allocator.alloc(reg_name, self.loc)
+                    self.handles[reg_name] = allocator.alloc(reg_name, self.parent.loc)
 
     def to_expr(self) -> ExpressionIndex:
         il = self.il
         match self.src:
             case ImmediateOperand(value):
-                return il.const(ARCH_SIZE, value, loc=self.loc)
+                return il.const(ARCH_SIZE, value, loc=self.parent.loc)
             case RegisterOperand(reg) | ControlRegisterOperand(reg):
                 reg = self.handles[RegisterName(reg.name)]
-                return il.reg(ARCH_SIZE, reg, loc=self.loc)
+                return il.reg(ARCH_SIZE, reg, loc=self.parent.loc)
             case RegisterPairOperand(high, low):
                 hi = self.handles[RegisterName(high.name)]
                 lo = self.handles[RegisterName(low.name)]
-                return il.reg_split(ARCH_SIZE, hi, lo, loc=self.loc)
+                return il.reg_split(ARCH_SIZE, hi, lo, loc=self.parent.loc)
             case MemoryOperand(mode, base, offset, scaled):
                 base = self.handles[RegisterName(base.name)]
-                base_il = il.reg(ARCH_SIZE, base, loc=self.loc)
+                base_il = il.reg(ARCH_SIZE, base, loc=self.parent.loc)
                 if isinstance(offset, Register):
                     offset = self.handles[RegisterName(offset.name)]
-                    offset_il = il.reg(ARCH_SIZE, offset, loc=self.loc)
+                    offset_il = il.reg(ARCH_SIZE, offset, loc=self.parent.loc)
                 else:
-                    offset_il = self.il.const(ARCH_SIZE, offset, loc=self.loc)
+                    offset_il = self.il.const(ARCH_SIZE, offset, loc=self.parent.loc)
                 if scaled:
                     offset_il = il.mult(ARCH_SIZE, 
                         offset_il,
-                        il.const(ARCH_SIZE, self.src.access_info.size, loc=self.loc),
-                        loc=self.loc)
+                        il.const(ARCH_SIZE, self.src.access_info.size, loc=self.parent.loc),
+                        loc=self.parent.loc)
                 match mode:
                     case (AddressingMode.NEG_OFFSET
                             | AddressingMode.PREDECREMENT
                             | AddressingMode.POSTDECREMENT):
-                        offset_il = il.neg_expr(ARCH_SIZE, offset_il, loc=self.loc)
-                self.address_expr = il.add(ARCH_SIZE, base_il, offset_il, loc=self.loc)
+                        offset_il = il.neg_expr(ARCH_SIZE, offset_il, loc=self.parent.loc)
+                self.address_expr = il.add(ARCH_SIZE, base_il, offset_il, loc=self.parent.loc)
                 match mode:
                     case (AddressingMode.POSTDECREMENT 
                             | AddressingMode.POSTINCREMENT):
@@ -287,10 +309,10 @@ class InputOperand:
         self.handles.clear()
 
 class Operation:
-    def __init__(self, inputs: list[InputOperand], callback, src: Instruction) -> None:
+    def __init__(self, inputs: list[InputOperand], callback, parent: LiftInstruction) -> None:
         self.inputs = inputs
         self.callback = callback
-        self.loc = _addr2loc(src.address)
+        self.parent = parent
         self._outputs = list()
         self._lifted = False
         self._statements: Sequence[ExpressionIndex] = tuple()
@@ -321,9 +343,9 @@ class Operation:
         self._lift()
         stored_exprs = list()
         for output_expr in self._output_exprs:
-            temp_reg = allocator.alloc(loc=self.loc)
-            store_temp(temp_reg, output_expr, il, loc=self.loc)
-            stored_exprs.append(il.reg(ARCH_SIZE, temp_reg, loc=self.loc))
+            temp_reg = allocator.alloc(loc=self.parent.loc)
+            store_temp(temp_reg, output_expr, il, loc=self.parent.loc)
+            stored_exprs.append(il.reg(ARCH_SIZE, temp_reg, loc=self.parent.loc))
         self._output_exprs = stored_exprs
         self._stored = True
         for input in self.inputs:
@@ -343,11 +365,10 @@ class Operation:
         return len(self._outputs) > 0
 
 class OutputOperand:
-    def __init__(self, src:Operand, operation: Operation, instr: Instruction) -> None:
+    def __init__(self, src:Operand, operation: Operation, parent: LiftInstruction) -> None:
         self.src = src
         self.operation = operation
-        self.instruction = instr
-        self.loc = _addr2loc(instr.address)
+        self.parent = parent
         self._high = False
         if self._is_writing():
             operation.register_output(self)
@@ -365,26 +386,26 @@ class OutputOperand:
         done = True
         match self.src:
             case RegisterOperand(reg):
-                if self.instruction.opcode in ('mvkh', 'mvklh'):
-                    il.append(il.set_reg(HW_SIZE, RegisterName(reg.name+'H'), value, loc=self.loc))
+                if self.parent.src.opcode in ('mvkh', 'mvklh'):
+                    il.append(il.set_reg(HW_SIZE, RegisterName(reg.name+'H'), value, loc=self.parent.loc))
                 else:
-                    il.append(il.set_reg(ARCH_SIZE, RegisterName(reg.name), value, loc=self.loc))
+                    il.append(il.set_reg(ARCH_SIZE, RegisterName(reg.name), value, loc=self.parent.loc))
             case RegisterPairOperand(high, low):
                 if self._high:
-                    il.append(il.set_reg(ARCH_SIZE, RegisterName(high.name), value, loc=self.loc))
+                    il.append(il.set_reg(ARCH_SIZE, RegisterName(high.name), value, loc=self.parent.loc))
                 else:
                     self._high = True
-                    il.append(il.set_reg(ARCH_SIZE, RegisterName(low.name), value, loc=self.loc))
+                    il.append(il.set_reg(ARCH_SIZE, RegisterName(low.name), value, loc=self.parent.loc))
                     done = False
             case MemoryOperand(_, base, _, _):
-                il.append(il.set_reg(ARCH_SIZE, RegisterName(base.name), value, loc=self.loc))
+                il.append(il.set_reg(ARCH_SIZE, RegisterName(base.name), value, loc=self.parent.loc))
             case ControlRegisterOperand(reg):
                 if reg == ControlRegister.PCE1:
                     #HACK: write access is not allowed, used to model jumps
                     branch = il.call
-                    if str(self.instruction.operands[0]) == 'B3':
+                    if str(self.parent.src.operands[0]) == 'B3':
                         branch = il.ret
-                    il.append(branch(value, loc=self.loc))
+                    il.append(branch(value, loc=self.parent.loc))
                 else:
                     raise NotImplementedError('control register writes')
         if done and is_temp_reg(value, il):
@@ -393,62 +414,77 @@ class OutputOperand:
 class LiftInstruction:
     def __init__(self, src: Instruction, il: LowLevelILFunction) -> None:
         self.src = src
-        self.inputs: list[InputOperand] = list()
+        self._inputs: list[InputOperand] = list()
         self._reads = list()
         self._writes = list()
-        self.output: OutputOperand | None = None
-        self.lift_cycle: int = 0
+        self._output: OutputOperand | None = None
+        self._lift_cycle: int = 0
+        self._condition_reg: Optional[RegisterHandle] = None
+        self._loc_ = _addr2loc(src.address)
 
         if src.opcode not in OPCODE_CALLBACKS:
-            self.operation = Operation([], get_unimplemented_cb(il, _addr2loc(src.address)), src)
+            self._operation = Operation([], get_unimplemented_cb(il, _addr2loc(src.address)), self)
             return
         
         for operand in src.operands:
             if isinstance(operand, MemoryOperand):
                 # Access info for memory operands documents memory access.
                 # Here, register access is relevant, which is RW.
-                input = InputOperand(operand, il, src)
+                input = InputOperand(operand, il, self)
                 # Register access is in first cycle.
                 # Memory access is in third cycle, but may be lifted without delay.
                 self._reads.append((0, input))
-                self.inputs.append(input)
+                self._inputs.append(input)
             elif operand.access_info.rw in (RW.none, RW.read, RW.read_write):
-                input = InputOperand(operand, il, src)
+                input = InputOperand(operand, il, self)
                 if operand.access_info.low_last:
                     self._reads.append((operand.access_info.low_last-1, input))
                 if operand.access_info.high_last:
                     self._reads.append((operand.access_info.high_last-1, input))
-                self.inputs.append(input)
-        self.lift_cycle = max(map(lambda c: c[0], self._reads), default=0)
-        self.operation = Operation(self.inputs, OPCODE_CALLBACKS[src.opcode](il, _addr2loc(src.address)), src)
+                self._inputs.append(input)
+        self._lift_cycle = max(map(lambda c: c[0], self._reads), default=0)
+        self._operation = Operation(self._inputs, OPCODE_CALLBACKS[src.opcode](il, _addr2loc(src.address)), self)
         for operand in src.operands:
             if isinstance(operand, MemoryOperand):
-                output = OutputOperand(operand, self.operation, src)
+                output = OutputOperand(operand, self._operation, self)
                 # Optional address write is in first cycle.
                 self._writes.append((0, output))
             elif operand.access_info.rw in (RW.write, RW.read_write):
-                self.output = OutputOperand(operand, self.operation, src)
+                self._output = OutputOperand(operand, self._operation, self)
                 if operand.access_info.low_first:
-                    self._writes.append((operand.access_info.low_first-1, self.output))
+                    self._writes.append((operand.access_info.low_first-1, self._output))
                 if operand.access_info.high_first:
-                    self._writes.append((operand.access_info.high_first-1, self.output))
+                    self._writes.append((operand.access_info.high_first-1, self._output))
         if _is_branch(src):
-            pc_output = OutputOperand(ControlRegisterOperand(ControlRegister.PCE1), self.operation, src)
+            pc_output = OutputOperand(ControlRegisterOperand(ControlRegister.PCE1), self._operation, self)
             # branches don't work differently, but their delay is similar
             self._writes.append((5, pc_output))
+
+        if self.src.condition.register is not None:
+            self._condition_reg = RegisterHandle(self.src.condition.register)
 
     def is_first(self) -> bool:
         # For load/store in same cycle, load occurs first.
         return self.src.opcode.lower().startswith('ld')
 
+    def get_condition(self) -> list[tuple[int, RegisterHandle]]:
+        if self._condition_reg is not None:
+            return [(0, self._condition_reg)]
+        else:
+            return []
+
     def get_reads(self) -> list[tuple[int, InputOperand]]:
         return self._reads
 
     def get_operation(self) -> tuple[int, Operation]:
-        return (self.lift_cycle, self.operation)
+        return (self._lift_cycle, self._operation)
     
     def get_writes(self) -> list[tuple[int, OutputOperand]]:
         return self._writes
+    
+    @property
+    def loc(self) -> ILSourceLocation:
+        return self._loc_
 
 def _addr2loc(address: int) -> ILSourceLocation:
     return ILSourceLocation(address, -1)
@@ -458,6 +494,9 @@ def _is_branch(instr: Instruction) -> bool:
 
 def _lift_cycle(ctx: LiftingContext):
     '''Translate one cycle of pipeline execution to IL'''
+    for handle in ctx.cond_queue.dequeue():
+        # handle.read(ctx.read_alloc)
+        pass
     for input in ctx.read_queue.dequeue():
         input.read(ctx.read_alloc)
     for operation in ctx.op_queue.dequeue():
@@ -479,6 +518,7 @@ def lift_ep(ctx: LiftingContext, packet: list[Instruction]):
 
     # 2. Enqueue parts of the EPs instructions in lifting queues
     for lift_instr in lift_packet:
+        ctx.cond_queue.enqueue(lift_instr.get_condition())
         ctx.read_queue.enqueue(lift_instr.get_reads())
         ctx.op_queue.enqueue([lift_instr.get_operation()], lift_instr.is_first())
         #HACK: front=True is workaround for branch lifting
