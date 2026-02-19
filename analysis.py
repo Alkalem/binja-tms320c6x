@@ -1,7 +1,7 @@
 from binaryninja.architecture import BasicBlockAnalysisContext, InstructionBranch
 from binaryninja.basicblock import BasicBlock
 from binaryninja.binaryview import BinaryView
-from binaryninja.enums import BranchType
+from binaryninja.enums import BranchType, FunctionAnalysisSkipOverride
 from binaryninja.function import ArchAndAddr, Function
 from binaryninja.lowlevelil import LowLevelILFunction
 from binaryninja.log import log_info, log_debug
@@ -10,7 +10,7 @@ from binaryninja.log import log_info, log_debug
 from dataclasses import dataclass
 from typing import Dict, Optional, Set
 
-from .disassembler.types import ConditionType, Instruction, OperandType, RegisterOperand, Register, ControlRegisterOperand, ControlRegister
+from .disassembler.types import ConditionType, Instruction, OperandType, RegisterOperand, Register, ControlRegisterOperand, ControlRegister, RW
 from .constants import ARCH_SIZE, FP_SIZE, HW_SIZE, BRANCH_DELAY
 from .util import get_delay_consumption
 
@@ -45,6 +45,13 @@ def analyze_basic_blocks(arch, func: Function,
     start = func.start
     blocks_to_process.append(ArchAndAddr(arch, start))
     seen_blocks.add(ArchAndAddr(arch, start))
+
+    total_size = 0
+    if context.analysis_skip_override == FunctionAnalysisSkipOverride.AlwaysSkipFunctionAnalysis:
+        max_size = 0
+    else:
+        max_size = context.max_function_size
+    max_size_reached = False
 
     while len(blocks_to_process) > 0:
         if view.analysis_is_aborted: return
@@ -163,12 +170,18 @@ def analyze_basic_blocks(arch, func: Function,
             def handle_branch(branch:InstructionBranch, returns:bool, carried_branches):
                 log_debug(f'Handling {branch.type.name} @{location.addr:08x} to {branch.target:08x} (return? {returns})')
                 nonlocal ends_block
+
                 match branch.type:
                     case BranchType.UnconditionalBranch|BranchType.TrueBranch:
                         ends_block = True
                         if branch.target == 0: return
                         assert branch.target
-                        if returns or is_likely_call(branch, carried_branches):
+                        target = ArchAndAddr(arch, branch.target)
+
+                        if view.should_skip_target_analysis(location, func, location.addr, target):
+                            return
+
+                        if is_likely_call(branch, carried_branches, returns):
                             assert len(carried_branches) == 0
                             block.add_pending_outgoing_edge(BranchType.CallDestination, branch.target, arch)
                             ends_block = False
@@ -177,6 +190,15 @@ def analyze_basic_blocks(arch, func: Function,
                             add_target_to_process(branch.target, carried_branches)
                     case BranchType.IndirectBranch:
                         ends_block = True
+                        target_type = branch.type
+                        if is_likely_call(branch, carried_branches, returns):
+                            assert len(carried_branches) == 0
+                            ends_block = False
+                        for indirect_branch in context.indirect_branches:
+                            if (indirect_branch.source_addr != location.addr):
+                                continue
+                            block.add_pending_outgoing_edge(target_type, indirect_branch.dest_addr, arch)
+                            add_target_to_process(indirect_branch.dest_addr, carried_branches)
                     case BranchType.FalseBranch:
                         if branch.target == 0:
                             # fallthrough false condition
@@ -210,11 +232,13 @@ def analyze_basic_blocks(arch, func: Function,
                         sploop_context.active = False
                         sploop_context.start = 0
             
-            def is_likely_call(branch:InstructionBranch, carried_branches) -> bool:
+            def is_likely_call(branch:InstructionBranch, carried_branches,
+                    returns:bool) -> bool:
                 # This address is not helpful if symbols for basic blocks exist
                 # next_func_addr = view.get_next_function_start_after(location.addr)
                 is_in_function = func.lowest_address <= branch.target
-                return len(carried_branches) == 0 and not is_in_function
+                return (len(carried_branches) == 0 and 
+                    (not is_in_function or returns))
 
             def add_target_to_process(addr:int, carried_branches):
                 target = ArchAndAddr(arch, addr)
@@ -233,7 +257,11 @@ def analyze_basic_blocks(arch, func: Function,
             _header_suffix = view.read(location.addr, FP_SIZE - (location.addr % FP_SIZE))
             for instr in arch.disasm.disasm(execution_packet+_header_suffix, ep_location.addr):
                 delay_consumption = max(get_delay_consumption(instr), delay_consumption)
-                if instr.opcode in ('addkpc', 'callp'):
+                if (instr.opcode in ('addkpc', 'callp')
+                        or any((RW.write in op.access_info.rw 
+                            and isinstance(op, RegisterOperand)
+                            and op.register == Register.B3
+                            for op in instr.operands))):
                     last_return_write = 0
                 if not (instr.parallel or instr.is_fp_header()): break
             for _ in range(delay_consumption):
@@ -246,7 +274,14 @@ def analyze_basic_blocks(arch, func: Function,
             last_return_write += delay_consumption
             
             location = ArchAndAddr(arch, ep_location.addr + len(execution_packet))
+
+            # update and check termination conditions
+            total_size += len(execution_packet)
+
             if ends_block: break
+            if (max_size and total_size > max_size):
+                max_size_reached = True
+                break
 
         if location.addr != block.start:
             # Block has one or more instructions, add it to the function
@@ -259,7 +294,10 @@ def analyze_basic_blocks(arch, func: Function,
             else:
                 block.end = location.addr
             context.add_basic_block(block)
+        
+        if max_size_reached: break
 
+    if max_size_reached: context.max_size_reached = True
     context.finalize()
 
 def __addr_is_executable(view:BinaryView, addr:int) -> bool:
