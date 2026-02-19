@@ -176,6 +176,9 @@ def _gen_operand_tokens(operand: Operand):
         case _:
             raise NotImplementedError(f'operand type {type(operand)}')
 
+CONDITION_LENGTH = 6
+OPCODE_INDENTATION = 12
+
 def gen_tokens(instr: Instruction, offset: int, parallel:bool):
     tokens = list()
     if parallel:
@@ -206,12 +209,12 @@ def gen_tokens(instr: Instruction, offset: int, parallel:bool):
     tokens.append(
         InstructionTextToken(
             InstructionTextTokenType.TextToken, 
-            ' ' * (6 -len(str(instr.condition))))
+            ' ' * (CONDITION_LENGTH -len(str(instr.condition))))
     )
 
     tokens.append(
         InstructionTextToken(
-            InstructionTextTokenType.InstructionToken, 
+            InstructionTextTokenType.CommentToken if instr.is_fp_header() else InstructionTextTokenType.InstructionToken, 
             instr.opcode)
     )
     middle_length = len(instr.opcode)
@@ -224,7 +227,7 @@ def gen_tokens(instr: Instruction, offset: int, parallel:bool):
     tokens.append(
         InstructionTextToken(
             InstructionTextTokenType.TextToken, 
-            " " * (12 - middle_length)),
+            " " * (OPCODE_INDENTATION - middle_length)),
     )
 
     if len(instr.operands) > 0:
@@ -249,3 +252,14 @@ def gen_newline(offset:int) -> InstructionTextToken:
         "", 
         offset
     )
+
+def gen_parallel_fallthrough(offset: int) -> list[InstructionTextToken]:
+    return [
+        InstructionTextToken(
+                InstructionTextTokenType.TextToken, '|| ' + ' ' * OPCODE_INDENTATION),
+        InstructionTextToken(
+                InstructionTextTokenType.CommentToken, '<parallel fallthrough>'),
+        InstructionTextToken(
+                InstructionTextTokenType.NewLineToken, '', 
+                offset)
+    ]

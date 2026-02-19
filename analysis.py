@@ -30,6 +30,7 @@ class SploopContext:
         if self.active and self.start == 0 and not i.parallel:
             self.start = i.address + i.size
 
+__function_context_type = dict[int, bytes]
 
 def analyze_basic_blocks(arch, func: Function, 
         context: BasicBlockAnalysisContext) -> None:
@@ -45,6 +46,9 @@ def analyze_basic_blocks(arch, func: Function,
     start = func.start
     blocks_to_process.append(ArchAndAddr(arch, start))
     seen_blocks.add(ArchAndAddr(arch, start))
+
+    function_context: __function_context_type = dict()
+    context.function_arch_context = function_context
 
     total_size = 0
     if context.analysis_skip_override == FunctionAnalysisSkipOverride.AlwaysSkipFunctionAnalysis:
@@ -104,6 +108,7 @@ def analyze_basic_blocks(arch, func: Function,
                     target_block.has_undetermined_outgoing_edges = False
                     target_block.can_exit = True
                     target_block.end = location.addr
+                    __update_context(function_context, location.addr, view)
 
                     for addr in range(location.addr, split_block.end, HW_SIZE):
                         k = ArchAndAddr(arch, addr)
@@ -285,20 +290,22 @@ def analyze_basic_blocks(arch, func: Function,
 
         if location.addr != block.start:
             # Block has one or more instructions, add it to the function
-            if location.addr % FP_SIZE:
-                # Add Header as Workaround (see https://github.com/Vector35/binaryninja-api/issues/742)
-                header_suffix = view.read(location.addr, FP_SIZE - (location.addr % FP_SIZE))
-                fp_header = header_suffix[-ARCH_SIZE:]
-                block.add_instruction_data(fp_header)
-                block.end = location.addr # + ARCH_SIZE
-            else:
-                block.end = location.addr
+            __update_context(function_context, location.addr, view)
+            block.end = location.addr
             context.add_basic_block(block)
         
         if max_size_reached: break
 
     if max_size_reached: context.max_size_reached = True
     context.finalize()
+
+def __update_context(context: __function_context_type, end_addr: int, view: BinaryView):
+    if end_addr % FP_SIZE:
+        header_suffix = view.read(end_addr, FP_SIZE - (end_addr % FP_SIZE))
+        fp_header = header_suffix[-ARCH_SIZE:]
+        if len(header_suffix) >= ARCH_SIZE and fp_header[-1] & 0xf0 == 0xe0:
+            fp_addr = end_addr - (end_addr % FP_SIZE)
+            context[fp_addr] = fp_header
 
 def __addr_is_executable(view:BinaryView, addr:int) -> bool:
     return view.is_offset_executable(addr)

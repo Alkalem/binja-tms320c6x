@@ -1,12 +1,14 @@
 from binaryninja.architecture import Architecture, RegisterInfo, \
-    RegisterName, BasicBlockAnalysisContext
+    RegisterName, BasicBlockAnalysisContext, InstructionTextToken
 from binaryninja.callingconvention import CallingConvention
 from binaryninja.function import Function
 from binaryninja.log import log_warn
 
+from typing import Any, Optional
+
 from .disassembler.types import Register, ControlRegister, ISA
 from .analysis import analyze_basic_blocks
-from .instruction import Disassembler, gen_tokens, gen_newline
+from .instruction import Disassembler, gen_tokens, gen_parallel_fallthrough
 from .constants import *
 from .lifting import lift_il
 
@@ -107,37 +109,40 @@ class TMS320C6x(TMS320C6xBaseArch):
 
     disasm = Disassembler(isa=ISA.C674X)
 
-    def get_instruction_text(self, data, addr):
-        # Workaround currently not possible because data is read from file
-        # data, limit = self.__header_workaround(data, addr)
-        try:
-            instructions = list(self.disasm.disasm(data, addr))
-        except:
-            log_warn(f'Failed @{addr:08x}, with {len(data)}, {data.hex()}')
-            return [], 0
-            # instructions = []
+    def get_instruction_text_with_context(self, data: bytes, addr: int, context: Any) -> Optional[tuple[list[InstructionTextToken], int]]:
+        if len(data) == self.max_instr_length or context is None:
+            instructions = self.disasm.disasm(data, addr)
+        else:
+            end_addr = addr + len(data)
+            fp_addr = end_addr - (end_addr % FP_SIZE)
+            num_words = (len(data) + HW_SIZE) // ARCH_SIZE
+            if fp_addr in context:
+                extended_data = data + b'\x00' * (FP_SIZE  - (end_addr % FP_SIZE) - ARCH_SIZE) + context[fp_addr]
+            else:
+                extended_data = data + b'\x00' * (FP_SIZE  - (end_addr % FP_SIZE))
+            instructions = self.disasm.disasm(extended_data, addr, num_words)
+
+        #TODO: add SPLOOP iteration index for SPKERNEL[R] disassembly
+
         tokens = []
         offset = 0
         parallel = False
-        sploop = False
         for instruction in instructions:
             tokens.extend(gen_tokens(instruction, offset, 
                     parallel and not instruction.is_fp_header()))
             offset += instruction.size
-            if 'sploop' in instruction.opcode:
-                sploop = True
-            elif 'spkernel' in instruction.opcode:
-                sploop = False
-            # separate execution packets, unless in sploop body
-            if (not instruction.parallel 
-                    and not instruction.is_fp_header()
-                    and not sploop): break
+            # separate execution packets
             if not instruction.is_fp_header():
                 parallel = instruction.parallel
-        else:
-            tokens.append(gen_newline(offset))
-            offset += ARCH_SIZE
+                if not parallel: break
+        if parallel:
+            # stopped in the middle of EP, visualize as parallel fallthrough
+            tokens.extend(gen_parallel_fallthrough(offset))
         return tokens, offset
+    
+    def get_instruction_text(self, data: bytes, addr: int) -> Optional[tuple[list[InstructionTextToken], int]]:
+        # Cannot reliably provide tokens without context, abort instead.
+        return None
 
     def get_instruction_low_level_il(self, data, addr, il):
         # data, _ = self.__header_workaround(data, addr)
