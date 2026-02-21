@@ -106,11 +106,11 @@ def _gen_operand_tokens(operand: Operand):
             if value >= LOAD_BASE:
                 return [InstructionTextToken(
                         InstructionTextTokenType.PossibleAddressToken,
-                        integer)]
+                        integer, value=value)]
             else:
                 return [InstructionTextToken(
                         InstructionTextTokenType.IntegerToken,
-                        integer)]
+                        integer, value=value)]
         case RegisterOperand(register)|ControlRegisterOperand(register):
             return [InstructionTextToken(
                     InstructionTextTokenType.RegisterToken,
@@ -130,7 +130,7 @@ def _gen_operand_tokens(operand: Operand):
                     low.name
                 )
             ]
-        case MemoryOperand(mode, base, offset):
+        case MemoryOperand(mode, base, offset, scaled):
             if mode & 2:
                 mode_pre = "*"
             elif mode & 9 == 0:
@@ -142,6 +142,7 @@ def _gen_operand_tokens(operand: Operand):
             else:
                 mode_pre = "*++"
             tokens = [
+                InstructionTextToken(InstructionTextTokenType.BeginMemoryOperandToken, ''),
                 InstructionTextToken(
                     InstructionTextTokenType.TextToken, 
                     mode_pre),
@@ -164,12 +165,13 @@ def _gen_operand_tokens(operand: Operand):
 
             tokens.extend([
                 InstructionTextToken(
-                    InstructionTextTokenType.BeginMemoryOperandToken, 
-                    "["),
+                    InstructionTextTokenType.BraceToken, 
+                    '[' if scaled else '('),
                 *_gen_operand_tokens(offset_operand),
                 InstructionTextToken(
-                    InstructionTextTokenType.EndMemoryOperandToken, 
-                    "]")
+                    InstructionTextTokenType.BraceToken, 
+                    ']' if scaled else ')'),
+                InstructionTextToken(InstructionTextTokenType.EndMemoryOperandToken, '')
             ])
             return tokens
         case FuncUnitsOperand(units):
@@ -213,14 +215,14 @@ def gen_tokens(instr: Instruction, offset: int, parallel:bool):
         and instr.condition.register is not None):
         tokens.extend([
             InstructionTextToken(
-                InstructionTextTokenType.TextToken, 
-                '[' if instr.condition.branch else '[!'),
+                InstructionTextTokenType.BraceToken, 
+                '[' if instr.condition.branch else '[!', value=instr.address),
             InstructionTextToken(
                 InstructionTextTokenType.RegisterToken,
                 instr.condition.register.name
             ),
             InstructionTextToken(
-                InstructionTextTokenType.TextToken, "]"),
+                InstructionTextTokenType.BraceToken, "]", value=instr.address),
         ])
     tokens.append(
         InstructionTextToken(
@@ -230,7 +232,7 @@ def gen_tokens(instr: Instruction, offset: int, parallel:bool):
 
     tokens.append(
         InstructionTextToken(
-            InstructionTextTokenType.CommentToken if instr.is_fp_header() else InstructionTextTokenType.InstructionToken, 
+            InstructionTextTokenType.CharacterConstantToken if instr.is_fp_header() else InstructionTextTokenType.InstructionToken, 
             instr.opcode)
     )
     middle_length = len(instr.opcode)
@@ -259,7 +261,7 @@ def gen_tokens(instr: Instruction, offset: int, parallel:bool):
     tokens.append(
             InstructionTextToken(
                 InstructionTextTokenType.NewLineToken, "", 
-                offset))
+                value=offset))
     return tokens
 
 def gen_newline(offset:int) -> InstructionTextToken:
