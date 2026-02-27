@@ -18,7 +18,7 @@ from binaryninja.architecture import Architecture, RegisterInfo, \
     RegisterName, BasicBlockAnalysisContext, InstructionTextToken
 from binaryninja.callingconvention import CallingConvention
 from binaryninja.function import Function
-from binaryninja.log import log_warn
+from binaryninja.log import log_warn, log_error
 
 from typing import Any, Optional
 
@@ -49,6 +49,48 @@ class TMS320C6xBaseArch(Architecture):
     def analyze_basic_blocks(self, func: Function, 
             context: BasicBlockAnalysisContext) -> None:
         analyze_basic_blocks(self, func, context)
+
+    @Architecture.can_assemble.getter
+    def can_assemble(self) -> bool:
+        return False
+    
+    def is_never_branch_patch_available(self, data: bytes, addr: int = 0) -> bool:
+        # Requires single instruction disassembly and branch detection.
+        if len(data) != 4:
+            return False
+        return False
+    
+    def is_always_branch_patch_available(self, data: bytes, addr: int = 0) -> bool:
+        # Requires single instruction disassembly and branch detection.
+        return False
+
+    def is_invert_branch_patch_available(self, data: bytes, addr: int = 0) -> bool:
+        # Requires single instruction disassembly and branch detection.
+        return False
+    
+    def is_skip_and_return_zero_patch_available(self, data: bytes, addr: int = 0) -> bool:
+        # Requires single instruction disassembly and call detection.
+        return False
+    
+    def is_skip_and_return_value_patch_available(self, data: bytes, addr: int = 0) -> bool:
+        # Requires single instruction disassembly and call detection.
+        return False
+    
+    def convert_to_nop(self, data: bytes, addr: int = 0) -> Optional[bytes]:
+        # TODO: preserve delay cycles, warn on NOPing load
+        if len(data) == 2:
+            if addr & 0x1f == 0x1e:
+                log_error(f'Failed to convert invalid instruction @{addr:08x} to NOP.')
+                return None
+            return bytes([0x6e, 0x0c])
+        elif len(data) == 4:
+            if addr & 0x2:
+                log_error(f'Failed to convert invalid instruction @{addr:08x} to NOP.')
+                return None
+            # preserve headers
+            if data[-1] & 0xf0 == 0xe0: return data
+            return bytes([data[0] & 1, 0, 0, 0])
+        return None
 
 class TMS320C67x(TMS320C6xBaseArch):
     name = 'TMS320C67x+'
