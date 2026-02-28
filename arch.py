@@ -60,12 +60,16 @@ class TMS320C6xBaseArch(Architecture):
         return is_branch(instr)
     
     def is_always_branch_patch_available(self, data: bytes, addr: int = 0) -> bool:
-        # Requires single instruction disassembly and branch detection.
-        return False
+        if len(data) != ARCH_SIZE: 
+            return False # cannot patch compact branch predicates
+        instr = self.disasm.decode_single(data, addr)
+        return is_branch(instr) and instr.condition.register is not None
 
     def is_invert_branch_patch_available(self, data: bytes, addr: int = 0) -> bool:
-        # Requires single instruction disassembly and branch detection.
-        return False
+        if len(data) != ARCH_SIZE: 
+            return False # cannot patch compact branch predicates
+        instr = self.disasm.decode_single(data, addr)
+        return is_branch(instr) and instr.condition.register is not None
     
     def is_skip_and_return_zero_patch_available(self, data: bytes, addr: int = 0) -> bool:
         # Requires single instruction disassembly and call detection.
@@ -101,6 +105,18 @@ class TMS320C6xBaseArch(Architecture):
     
     def never_branch(self, data: bytes, addr: int = 0) -> Optional[bytes]:
         return self.convert_to_nop(data, addr)
+    
+    def always_branch(self, data: bytes, addr: int = 0) -> Optional[bytes]:
+        if len(data) != ARCH_SIZE or addr & 2:
+            return None
+        # NOTE: BDEC and BPOS are not replaced with B
+        return data[:-1] + bytes([data[-1] & 0xf])
+    
+    def invert_branch(self, data: bytes, addr: int = 0) -> Optional[bytes]:
+        if len(data) != ARCH_SIZE or addr & 2:
+            return None
+        # NOTE: BDEC and BPOS are not inverted
+        return data[:-1] + bytes([data[-1] ^ 0x10])
 
 class TMS320C67x(TMS320C6xBaseArch):
     name = 'TMS320C67x+'
