@@ -34,12 +34,14 @@ class _BranchInfo:
     target:int
     conditional:bool
 
+_compact_header = bytes.fromhex('0000e0ef')
+
 class Disassembler:
     def __init__(self, isa:ISA=ISA.C67X):
         self.__dis = C6xDisassembler(isa=isa)
     
-    def disasm(self, data, addr, limit=-1) -> Generator[Instruction, Any, None]:
-        return self.__dis.disasm(data, addr, count=limit)
+    def disasm(self, data, addr, limit=-1, end:int=0, **options) -> Generator[Instruction]:
+        return self.__dis.disasm(data, addr, count=limit, **options)
 
     def decode(self, data, addr) -> Instruction:
         try:
@@ -50,14 +52,41 @@ class Disassembler:
             return Instruction.invalid(addr, 4, False, None)
         return instr
     
-    def info(self, data, addr):
-        instructions = self.disasm(data, addr)
+    def decode_single(self, data, addr, header=None, **options) -> Instruction:
+        '''Disassemble a single instruction.
+        
+        The length of the instruction to decode should be known.
+        Do not use the header attribute of the returned instruction,
+        unless you provided the matching header.
+        '''
+        if (len(data) == 2 or addr & 2) and header is None:
+            header = _compact_header
         try:
-            instr = next(instructions)
-        except:
-            log_warn(f'Got invalid data {len(data)} @{addr:08x}')
-            instr = Instruction.invalid(addr, 
+            return next(self.__dis.disasm(data, addr, header=header, **options))
+        except StopIteration:
+            raise ValueError('provided args cannot be decoded')
+
+    def _try_disasm_single(self, data, addr) -> Instruction:
+        '''Disassemble a single instruction on a best effort basis.
+        
+        Results may be inaccurate, especially for invalid instructions.
+        Do not use the header attribute of the returned instruction.
+        '''
+        instr = Instruction.invalid(addr, 
                     2 if addr & 2 else ARCH_SIZE, False, None)
+        if not addr & 2:
+            try:
+                instr = next(self.__dis.disasm(data, addr, count=1))
+            except StopIteration: pass
+            if not instr.is_invalid():
+                return instr
+        try:
+            instr = next(self.__dis.disasm(data, addr, count=1, header=_compact_header))
+        except StopIteration: pass
+        return instr
+
+    def info(self, data, addr):
+        instr = self._try_disasm_single(data, addr)
         result = InstructionInfo()
         result.length = instr.size
         if instr.is_invalid() or instr.is_fp_header(): return result

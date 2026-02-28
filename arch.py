@@ -27,6 +27,7 @@ from .analysis import analyze_basic_blocks
 from .instruction import Disassembler, gen_tokens, gen_parallel_fallthrough
 from .constants import *
 from .lifting import lift_il
+from .util import get_delay_consumption, is_branch
 
 
 class TMS320C6xBaseArch(Architecture):
@@ -55,10 +56,8 @@ class TMS320C6xBaseArch(Architecture):
         return False
     
     def is_never_branch_patch_available(self, data: bytes, addr: int = 0) -> bool:
-        # Requires single instruction disassembly and branch detection.
-        if len(data) != 4:
-            return False
-        return False
+        instr = self.disasm.decode_single(data, addr)
+        return is_branch(instr)
     
     def is_always_branch_patch_available(self, data: bytes, addr: int = 0) -> bool:
         # Requires single instruction disassembly and branch detection.
@@ -77,20 +76,31 @@ class TMS320C6xBaseArch(Architecture):
         return False
     
     def convert_to_nop(self, data: bytes, addr: int = 0) -> Optional[bytes]:
-        # TODO: preserve delay cycles, warn on NOPing load
+        if len(data) > ARCH_SIZE:
+            # not supported because not header-aware
+            return None
+        instr = self.disasm.decode_single(data, addr)
+        # limit to max nop delay for IDLE
+        delay = min(8, get_delay_consumption(instr) - 1)
+        if instr.opcode.startswith('ld') and addr % 0x20 != 0x1c:
+            log_warn(f'NOPing load instruction is unaware of protected loads @{addr:08x}')
         if len(data) == 2:
             if addr & 0x1f == 0x1e:
                 log_error(f'Failed to convert invalid instruction @{addr:08x} to NOP.')
                 return None
-            return bytes([0x6e, 0x0c])
+            delay = min(7, delay) # only 3 bits for compact NOP
+            return bytes([0x6e, (delay << 5) | 0x0c])
         elif len(data) == 4:
             if addr & 0x2:
                 log_error(f'Failed to convert invalid instruction @{addr:08x} to NOP.')
                 return None
             # preserve headers
             if data[-1] & 0xf0 == 0xe0: return data
-            return bytes([data[0] & 1, 0, 0, 0])
+            return bytes([data[0] & 1, 0 | ((delay & 7) << 5), 0 | ((delay & 8) >> 3), 0])
         return None
+    
+    def never_branch(self, data: bytes, addr: int = 0) -> Optional[bytes]:
+        return self.convert_to_nop(data, addr)
 
 class TMS320C67x(TMS320C6xBaseArch):
     name = 'TMS320C67x+'

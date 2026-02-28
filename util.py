@@ -39,3 +39,6 @@ def get_delay_consumption(instr:Instruction):
             and instr.header.protected_loads):
         delay_slots += 4 # NOP cycles after instruction
     return delay_slots
+
+def is_branch(instruction: Instruction) -> bool:
+    return instruction.opcode in ('b', 'bpos', 'bdec', 'bnop', 'callp')
