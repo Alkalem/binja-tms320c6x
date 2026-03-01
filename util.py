@@ -42,6 +42,9 @@ def get_delay_consumption(instr:Instruction):
         delay_slots += 4 # NOP cycles after instruction
     return delay_slots
 
+def is_branch(instruction: Instruction) -> bool:
+    return instruction.opcode in ('b', 'bpos', 'bdec', 'bnop', 'callp')
+
 class UnwrapError(ValueError):
     '''Unwrapping of None value.'''
     pass
@@ -49,4 +52,3 @@ class UnwrapError(ValueError):
 def unwrap[T](obj: Optional[T]) -> T:
     if obj is None: raise UnwrapError
     return obj
-

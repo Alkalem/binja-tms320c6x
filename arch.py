@@ -18,7 +18,7 @@ from binaryninja.architecture import Architecture, RegisterInfo, RegisterName, B
 from binaryninja.callingconvention import CallingConvention
 from binaryninja.enums import ImplicitRegisterExtend
 from binaryninja.function import Function
-from binaryninja.log import log_warn
+from binaryninja.log import log_warn, log_error
 from binaryninja.lowlevelil import LowLevelILFunction
 
 from typing import Any, Optional
@@ -28,6 +28,7 @@ from .analysis import analyze_basic_blocks
 from .instruction import Disassembler, gen_tokens, gen_parallel_fallthrough
 from .constants import *
 from .lifting import lift_instructions, lift_function
+from .util import get_delay_consumption, is_branch
 
 
 class TMS320C6xBaseArch(Architecture):
@@ -51,6 +52,73 @@ class TMS320C6xBaseArch(Architecture):
     def analyze_basic_blocks(self, func: Function, 
             context: BasicBlockAnalysisContext) -> None:
         analyze_basic_blocks(self, func, context)
+
+    @Architecture.can_assemble.getter
+    def can_assemble(self) -> bool:
+        return False
+    
+    def is_never_branch_patch_available(self, data: bytes, addr: int = 0) -> bool:
+        instr = self.disasm.decode_single(data, addr)
+        return is_branch(instr)
+    
+    def is_always_branch_patch_available(self, data: bytes, addr: int = 0) -> bool:
+        if len(data) != ARCH_SIZE: 
+            return False # cannot patch compact branch predicates
+        instr = self.disasm.decode_single(data, addr)
+        return is_branch(instr) and instr.condition.register is not None
+
+    def is_invert_branch_patch_available(self, data: bytes, addr: int = 0) -> bool:
+        if len(data) != ARCH_SIZE: 
+            return False # cannot patch compact branch predicates
+        instr = self.disasm.decode_single(data, addr)
+        return is_branch(instr) and instr.condition.register is not None
+    
+    def is_skip_and_return_zero_patch_available(self, data: bytes, addr: int = 0) -> bool:
+        # Requires single instruction disassembly and call detection.
+        return False
+    
+    def is_skip_and_return_value_patch_available(self, data: bytes, addr: int = 0) -> bool:
+        # Requires single instruction disassembly and call detection.
+        return False
+    
+    def convert_to_nop(self, data: bytes, addr: int = 0) -> Optional[bytes]:
+        if len(data) > ARCH_SIZE:
+            # not supported because not header-aware
+            return None
+        instr = self.disasm.decode_single(data, addr)
+        # limit to max nop delay for IDLE
+        delay = min(8, get_delay_consumption(instr) - 1)
+        if instr.opcode.startswith('ld') and addr % 0x20 != 0x1c:
+            log_warn(f'NOPing load instruction is unaware of protected loads @{addr:08x}')
+        if len(data) == 2:
+            if addr & 0x1f == 0x1e:
+                log_error(f'Failed to convert invalid instruction @{addr:08x} to NOP.')
+                return None
+            delay = min(7, delay) # only 3 bits for compact NOP
+            return bytes([0x6e, (delay << 5) | 0x0c])
+        elif len(data) == 4:
+            if addr & 0x2:
+                log_error(f'Failed to convert invalid instruction @{addr:08x} to NOP.')
+                return None
+            # preserve headers
+            if data[-1] & 0xf0 == 0xe0: return data
+            return bytes([data[0] & 1, 0 | ((delay & 7) << 5), 0 | ((delay & 8) >> 3), 0])
+        return None
+    
+    def never_branch(self, data: bytes, addr: int = 0) -> Optional[bytes]:
+        return self.convert_to_nop(data, addr)
+    
+    def always_branch(self, data: bytes, addr: int = 0) -> Optional[bytes]:
+        if len(data) != ARCH_SIZE or addr & 2:
+            return None
+        # NOTE: BDEC and BPOS are not replaced with B
+        return data[:-1] + bytes([data[-1] & 0xf])
+    
+    def invert_branch(self, data: bytes, addr: int = 0) -> Optional[bytes]:
+        if len(data) != ARCH_SIZE or addr & 2:
+            return None
+        # NOTE: BDEC and BPOS are not inverted
+        return data[:-1] + bytes([data[-1] ^ 0x10])
 
 class TMS320C67x(TMS320C6xBaseArch):
     name = 'TMS320C67x+'

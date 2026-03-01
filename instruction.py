@@ -34,12 +34,14 @@ class _BranchInfo:
     target:int
     conditional:bool
 
+_compact_header = bytes.fromhex('0000e0ef')
+
 class Disassembler:
     def __init__(self, isa:ISA=ISA.C67X):
         self.__dis = C6xDisassembler(isa=isa)
     
-    def disasm(self, data, addr, limit=-1) -> Generator[Instruction, Any, None]:
-        return self.__dis.disasm(data, addr, count=limit)
+    def disasm(self, data, addr, limit=-1, end:int=0, **options) -> Generator[Instruction]:
+        return self.__dis.disasm(data, addr, count=limit, **options)
 
     def decode(self, data, addr) -> Instruction:
         try:
@@ -50,14 +52,41 @@ class Disassembler:
             return Instruction.invalid(addr, 4, False, None)
         return instr
     
-    def info(self, data, addr):
-        instructions = self.disasm(data, addr)
+    def decode_single(self, data, addr, header=None, **options) -> Instruction:
+        '''Disassemble a single instruction.
+        
+        The length of the instruction to decode should be known.
+        Do not use the header attribute of the returned instruction,
+        unless you provided the matching header.
+        '''
+        if (len(data) == 2 or addr & 2) and header is None:
+            header = _compact_header
         try:
-            instr = next(instructions)
-        except:
-            log_warn(f'Got invalid data {len(data)} @{addr:08x}')
-            instr = Instruction.invalid(addr, 
+            return next(self.__dis.disasm(data, addr, header=header, **options))
+        except StopIteration:
+            raise ValueError('provided args cannot be decoded')
+
+    def _try_disasm_single(self, data, addr) -> Instruction:
+        '''Disassemble a single instruction on a best effort basis.
+        
+        Results may be inaccurate, especially for invalid instructions.
+        Do not use the header attribute of the returned instruction.
+        '''
+        instr = Instruction.invalid(addr, 
                     2 if addr & 2 else ARCH_SIZE, False, None)
+        if not addr & 2:
+            try:
+                instr = next(self.__dis.disasm(data, addr, count=1))
+            except StopIteration: pass
+            if not instr.is_invalid():
+                return instr
+        try:
+            instr = next(self.__dis.disasm(data, addr, count=1, header=_compact_header))
+        except StopIteration: pass
+        return instr
+
+    def info(self, data, addr):
+        instr = self._try_disasm_single(data, addr)
         result = InstructionInfo()
         result.length = instr.size
         if instr.is_invalid() or instr.is_fp_header(): return result
@@ -106,11 +135,11 @@ def _gen_operand_tokens(operand: Operand):
             if value >= LOAD_BASE:
                 return [InstructionTextToken(
                         InstructionTextTokenType.PossibleAddressToken,
-                        integer)]
+                        integer, value=value)]
             else:
                 return [InstructionTextToken(
                         InstructionTextTokenType.IntegerToken,
-                        integer)]
+                        integer, value=value)]
         case RegisterOperand(register)|ControlRegisterOperand(register):
             return [InstructionTextToken(
                     InstructionTextTokenType.RegisterToken,
@@ -130,7 +159,7 @@ def _gen_operand_tokens(operand: Operand):
                     low.name
                 )
             ]
-        case MemoryOperand(mode, base, offset):
+        case MemoryOperand(mode, base, offset, scaled):
             if mode & 2:
                 mode_pre = "*"
             elif mode & 9 == 0:
@@ -142,6 +171,7 @@ def _gen_operand_tokens(operand: Operand):
             else:
                 mode_pre = "*++"
             tokens = [
+                InstructionTextToken(InstructionTextTokenType.BeginMemoryOperandToken, ''),
                 InstructionTextToken(
                     InstructionTextTokenType.TextToken, 
                     mode_pre),
@@ -164,12 +194,13 @@ def _gen_operand_tokens(operand: Operand):
 
             tokens.extend([
                 InstructionTextToken(
-                    InstructionTextTokenType.BeginMemoryOperandToken, 
-                    "["),
+                    InstructionTextTokenType.BraceToken, 
+                    '[' if scaled else '('),
                 *_gen_operand_tokens(offset_operand),
                 InstructionTextToken(
-                    InstructionTextTokenType.EndMemoryOperandToken, 
-                    "]")
+                    InstructionTextTokenType.BraceToken, 
+                    ']' if scaled else ')'),
+                InstructionTextToken(InstructionTextTokenType.EndMemoryOperandToken, '')
             ])
             return tokens
         case FuncUnitsOperand(units):
@@ -213,14 +244,14 @@ def gen_tokens(instr: Instruction, offset: int, parallel:bool):
         and instr.condition.register is not None):
         tokens.extend([
             InstructionTextToken(
-                InstructionTextTokenType.TextToken, 
-                '[' if instr.condition.branch else '[!'),
+                InstructionTextTokenType.BraceToken, 
+                '[' if instr.condition.branch else '[!', value=instr.address),
             InstructionTextToken(
                 InstructionTextTokenType.RegisterToken,
                 instr.condition.register.name
             ),
             InstructionTextToken(
-                InstructionTextTokenType.TextToken, "]"),
+                InstructionTextTokenType.BraceToken, "]", value=instr.address),
         ])
     tokens.append(
         InstructionTextToken(
@@ -230,7 +261,7 @@ def gen_tokens(instr: Instruction, offset: int, parallel:bool):
 
     tokens.append(
         InstructionTextToken(
-            InstructionTextTokenType.CommentToken if instr.is_fp_header() else InstructionTextTokenType.InstructionToken, 
+            InstructionTextTokenType.CharacterConstantToken if instr.is_fp_header() else InstructionTextTokenType.InstructionToken, 
             instr.opcode)
     )
     middle_length = len(instr.opcode)
@@ -259,7 +290,7 @@ def gen_tokens(instr: Instruction, offset: int, parallel:bool):
     tokens.append(
             InstructionTextToken(
                 InstructionTextTokenType.NewLineToken, "", 
-                offset))
+                value=offset))
     return tokens
 
 def gen_newline(offset:int) -> InstructionTextToken:
