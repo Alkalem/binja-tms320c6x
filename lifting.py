@@ -20,7 +20,7 @@ from binaryninja.architecture import RegisterName
 from binaryninja.basicblock import BasicBlock
 from binaryninja.commonil import ILSourceLocation
 from binaryninja.function import ArchAndAddr
-from binaryninja.lowlevelil import ILRegister, LowLevelILReg, LowLevelILFunction, ExpressionIndex, LLIL_REG_IS_TEMP, LLIL_TEMP, LLIL_GET_TEMP_REG_INDEX
+from binaryninja.lowlevelil import ILRegister, LowLevelILReg, LowLevelILFunction, ExpressionIndex, LLIL_REG_IS_TEMP, LLIL_TEMP, LLIL_GET_TEMP_REG_INDEX, LowLevelILLabel
 from binaryninja.log import log_warn, log_info, log_debug, log_error
 from binaryninja.variable import PossibleValueSet, ValueRange
 
@@ -414,6 +414,7 @@ class OutputOperand:
 class LiftInstruction:
     def __init__(self, src: Instruction, il: LowLevelILFunction) -> None:
         self.src = src
+        self._il = il
         self._inputs: list[InputOperand] = list()
         self._reads = list()
         self._writes = list()
@@ -421,11 +422,14 @@ class LiftInstruction:
         self._lift_cycle: int = 0
         self._condition_reg: Optional[RegisterHandle] = None
         self._loc_ = _addr2loc(src.address)
+        self.__unimplemented = True
 
         if src.opcode not in OPCODE_CALLBACKS:
             self._operation = Operation([], get_unimplemented_cb(il, _addr2loc(src.address)), self)
             return
+        self.__unimplemented = False
         
+
         for operand in src.operands:
             if isinstance(operand, MemoryOperand):
                 # Access info for memory operands documents memory access.
@@ -460,18 +464,32 @@ class LiftInstruction:
             # branches don't work differently, but their delay is similar
             self._writes.append((5, pc_output))
 
-        if self.src.condition.register is not None:
-            self._condition_reg = RegisterHandle(self.src.condition.register)
+        if self.is_conditional():
+            self._condition_reg = RegisterHandle(unwrap(self.src.condition.register))
 
     def is_first(self) -> bool:
         # For load/store in same cycle, load occurs first.
         return self.src.opcode.lower().startswith('ld')
+    
+    def is_conditional(self) -> bool:
+        if self.__unimplemented: return False
+        return self.src.condition.register is not None
 
     def get_condition(self) -> list[tuple[int, RegisterHandle]]:
         if self._condition_reg is not None:
             return [(0, self._condition_reg)]
         else:
             return []
+        
+    def get_condition_expr(self) -> ExpressionIndex:
+        assert self.is_conditional()
+        zero = self._il.const(ARCH_SIZE, 0)
+        cond_reg = self._il.reg(ARCH_SIZE, unwrap(self._condition_reg).get(), self.loc)
+        if self.src.condition.branch:
+            cond = self._il.compare_equal(ARCH_SIZE, cond_reg, zero, self.loc)
+        else:
+            cond = self._il.compare_not_equal(ARCH_SIZE, cond_reg, zero, self.loc)
+        return cond
 
     def get_reads(self) -> list[tuple[int, InputOperand]]:
         return self._reads
@@ -492,6 +510,19 @@ def _addr2loc(address: int) -> ILSourceLocation:
 def _is_branch(instr: Instruction) -> bool:
     return instr.opcode in ('b', 'bpos', 'bdec', 'callp')
 
+def _check_condition(instruction: LiftInstruction, il: LowLevelILFunction) -> Optional[LowLevelILLabel]:
+    if not instruction.is_conditional():
+        return None
+    true_case = LowLevelILLabel()
+    false_case = LowLevelILLabel()
+    il.append(il.if_expr(instruction.get_condition_expr(), true_case, false_case, instruction.loc))
+    il.mark_label(true_case)
+    return false_case
+
+def _end_condition(false_label: Optional[LowLevelILLabel], il: LowLevelILFunction):
+    if false_label is None: return
+    il.mark_label(false_label)
+
 def _lift_cycle(ctx: LiftingContext):
     '''Translate one cycle of pipeline execution to IL'''
     for handle in ctx.cond_queue.dequeue():
@@ -500,12 +531,16 @@ def _lift_cycle(ctx: LiftingContext):
     for input in ctx.read_queue.dequeue():
         input.read(ctx.read_alloc)
     for operation in ctx.op_queue.dequeue():
+        # false_label = _check_condition(operation.parent, ctx.il)
         for statement in operation.get_statements():
             ctx.il.append(statement)
         if operation.has_outputs():
             operation.store(ctx.read_alloc, ctx.il)
+        # _end_condition(false_label, ctx.il)
     for output in ctx.write_queue.dequeue():
+        # false_label = _check_condition(output.parent, ctx.il)
         output.write(ctx.il, ctx.temp_alloc)
+        # _end_condition(false_label, ctx.il)
 
 def _drain_queues(ctx: LiftingContext):
     while any(map(lambda q: len(q) > 0, (ctx.read_queue, ctx.op_queue, ctx.write_queue))):
