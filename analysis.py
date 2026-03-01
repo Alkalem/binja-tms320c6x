@@ -36,6 +36,7 @@ class SploopContext:
     active:bool = False
     sploop:Optional[Instruction] = None
     start:int = 0
+    end:int = 0
 
 
     def process(self, i:Instruction):
@@ -43,10 +44,17 @@ class SploopContext:
             assert not self.active
             self.active = True
             self.sploop = i
+        elif i.opcode.startswith('spkernel'):
+            self.end = i.address
         if self.active and self.start == 0 and not i.parallel:
             self.start = i.address + i.size
 
-__function_context_type = dict[int, bytes]
+class FunctionContext:
+    def __init__(self) -> None:
+        self.headers: dict[int, bytes] = dict()
+        self.sploop_ii: dict[int, int] = dict()
+
+__function_context_type = FunctionContext
 
 def analyze_basic_blocks(arch, func: Function, 
         context: BasicBlockAnalysisContext) -> None:
@@ -56,14 +64,14 @@ def analyze_basic_blocks(arch, func: Function,
     instr_blocks:Dict[ArchAndAddr, BasicBlock] = dict()
     seen_blocks:Set[ArchAndAddr] = set()
     block_carried_branches = dict()
-    sploop_blocks = dict()
+    sploop_blocks: dict[ArchAndAddr, SploopContext] = dict()
 
     # Start by processing the entry point of the function
     start = func.start
     blocks_to_process.append(ArchAndAddr(arch, start))
     seen_blocks.add(ArchAndAddr(arch, start))
 
-    function_context: __function_context_type = dict()
+    function_context: __function_context_type = FunctionContext()
     context.function_arch_context = function_context
 
     total_size = 0
@@ -239,6 +247,8 @@ def analyze_basic_blocks(arch, func: Function,
                         ends_block = True
                         if sploop_context.sploop is None:
                             sploop_context.start = block.start
+                        else:
+                            function_context.sploop_ii[sploop_context.end] = sploop_context.sploop.operands[0].value # type: ignore
                         # used for SPLOOP exit branches
                         block.add_pending_outgoing_edge(
                             BranchType.TrueBranch,
@@ -321,7 +331,7 @@ def __update_context(context: __function_context_type, end_addr: int, view: Bina
         fp_header = header_suffix[-ARCH_SIZE:]
         if len(header_suffix) >= ARCH_SIZE and fp_header[-1] & 0xf0 == 0xe0:
             fp_addr = end_addr - (end_addr % FP_SIZE)
-            context[fp_addr] = fp_header
+            context.headers[fp_addr] = fp_header
 
 def __addr_is_executable(view:BinaryView, addr:int) -> bool:
     return view.is_offset_executable(addr)
