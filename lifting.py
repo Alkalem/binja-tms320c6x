@@ -61,36 +61,79 @@ class TempAllocator:
         return ILRegister(self.arch, LLIL_TEMP(reg_id))
 
     def free(self, tmp):
+        if LLIL_GET_TEMP_REG_INDEX(tmp) in self.free_temp_regs: return
         self.free_temp_regs.append(LLIL_GET_TEMP_REG_INDEX(tmp))
 
-class TempReadAllocator:
+class RegTempAllocator:
     def __init__(self, il: LowLevelILFunction, temp_alloc: TempAllocator) -> None:
         self.il = il
         self.temp_alloc = temp_alloc
-        self.references:dict[RegisterName, int] = dict()
-        self.assignments:dict[RegisterName, ILRegister] = dict()
-
-    def alloc(self, reg: Optional[RegisterName] = None, loc=None) -> ILRegister:
-        if reg is None:
+        self.references: dict[ILRegister, int] = dict()
+        self.handles: dict[RegisterName, list[RegisterHandle]] = dict()
+        self.active_handles: dict[RegisterName, RegisterHandle] = dict()
+    
+    def alloc(self, name: Optional[RegisterName] = None, loc: ILSourceLocation | None = None) -> RegisterHandle:
+        if name is None:
             temp_reg = self.temp_alloc.alloc()
-            return temp_reg
-        if reg in self.references:
+            handle = RegisterHandle(temp_reg.name, temp_reg, self, self.il, loc)
+            return handle
+        if name in self.active_handles:
+            handle = self.active_handles[name]
+            reg = handle.reg
             self.references[reg] += 1
         else:
-            self.references[reg] = 1
             temp_reg = self.temp_alloc.alloc()
-            self.assignments[reg] = temp_reg
-            value = self.il.reg(ARCH_SIZE, reg, loc=loc)
+            value = self.il.reg(ARCH_SIZE, name, loc=loc)
             store_temp(temp_reg, value, self.il, loc=loc)
-        return self.assignments[reg]
+            handle = RegisterHandle(name, temp_reg, self, self.il, loc)
+            self.references[temp_reg] = 1
+            if not name in self.handles:
+                self.handles[name] = list()
+            self.handles[name].append(handle)
+            self.active_handles[name] = handle
+        return handle
     
-    def free(self, reg: RegisterName):
-        if reg not in self.references: return
+    def free(self, handle: RegisterHandle):
+        reg = handle.reg
+        if reg not in self.references:
+            self.temp_alloc.free(reg)
         self.references[reg] -= 1
         if self.references[reg] <= 0:
+            self.temp_alloc.free(reg)
             del self.references[reg]
-            self.temp_alloc.free(self.assignments[reg])
-            del self.assignments[reg]
+            self.handles[handle.name].remove(handle)
+            if self.active_handles[handle.name] == handle:
+                del self.active_handles[handle.name]
+
+    def notify_write(self, name: RegisterName):
+        if name not in self.active_handles: return
+        del self.active_handles[name]
+
+class RegisterHandle:
+    def __init__(self, name: RegisterName, reg: ILRegister, allocator: RegTempAllocator, il: LowLevelILFunction, loc: ILSourceLocation | None = None) -> None:
+        self.name = name
+        self._allocator = allocator
+        self.reg = reg
+        self._il = il
+        self._loc = loc
+        self._reg_expr = None
+        self._pair_expr = None
+
+    def get(self) -> ExpressionIndex:
+        if self._reg_expr is None:
+            self._reg_expr = self._il.reg(ARCH_SIZE, self.reg, self._loc)
+        return self._reg_expr
+    
+    def get_pair(self, other: RegisterHandle) -> ExpressionIndex:
+        if self._pair_expr is None:
+            if self.name < other.name:
+                self._pair_expr = self._il.reg_split(ARCH_SIZE, other.reg, self.reg, self._loc)
+            else:
+                self._pair_expr = other.get_pair(self)
+        return self._pair_expr
+
+    def free(self):
+        self._allocator.free(self)
 
 def is_temp_reg(expr: ExpressionIndex, il: LowLevelILFunction) -> bool:
     instr = il.get_expr(expr)
@@ -112,12 +155,12 @@ class LiftingContext:
         self.arch = arch
         self.il = il
         self.settings = settings
-        self.cond_queue:LiftingQueue[RegisterHandle] = LiftingQueue(32)
+        self.cond_queue:LiftingQueue[ReadHandle] = LiftingQueue(32)
         self.read_queue:LiftingQueue[InputOperand] = LiftingQueue(32)
         self.op_queue:LiftingQueue[Operation] = LiftingQueue(32)
         self.write_queue:LiftingQueue[OutputOperand] = LiftingQueue(32)
         self.temp_alloc = TempAllocator(arch)
-        self.read_alloc = TempReadAllocator(il, self.temp_alloc)
+        self.reg_alloc = RegTempAllocator(il, self.temp_alloc)
 
 
 def _get_bin_op_cb(il: LowLevelILFunction, op, loc: ILSourceLocation):
@@ -202,37 +245,16 @@ class LiftingQueue[T]:
     def __len__(self) -> int:
         return len(self.cycle_queues)
 
-class RegisterHandle:
-    def __init__(self, register: Register) -> None:
-        self.name = RegisterName(register.name)
-        self._is_read = False
-
-    def read(self, allocator: TempReadAllocator):
-        if self._is_read: return
-        self._allocator = allocator
-        self._handle = allocator.alloc(self.name)
-        self._is_read = True
-
-    def get(self) -> ILRegister:
-        assert self._is_read, 'must read register before usage'
-        return self._handle
-
-    def free(self):
-        if self._is_read:
-            self._allocator.free(self.name)
-        del self._handle
-        self._is_read = False
-
 class InputOperand:
     def __init__(self, src: Operand, il: LowLevelILFunction, parent: LiftInstruction) -> None:
         self.src = src
         self.parent = parent
         self.il = il
-        self.handles:dict[RegisterName, ILRegister] = dict()
+        self.handles:dict[RegisterName, RegisterHandle] = dict()
         self._is_read = False
         self.low = True
 
-    def read(self, allocator: TempReadAllocator):
+    def read(self, allocator: RegTempAllocator):
         if self._is_read: return
         # allocate register reads and store handles
         self._is_read = True
@@ -260,18 +282,18 @@ class InputOperand:
             case ImmediateOperand(value):
                 return il.const(ARCH_SIZE, value, loc=self.parent.loc)
             case RegisterOperand(reg) | ControlRegisterOperand(reg):
-                reg = self.handles[RegisterName(reg.name)]
-                return il.reg(ARCH_SIZE, reg, loc=self.parent.loc)
+                reg_handle = self.handles[RegisterName(reg.name)]
+                return reg_handle.get()
             case RegisterPairOperand(high, low):
                 hi = self.handles[RegisterName(high.name)]
                 lo = self.handles[RegisterName(low.name)]
-                return il.reg_split(ARCH_SIZE, hi, lo, loc=self.parent.loc)
+                return lo.get_pair(hi)
             case MemoryOperand(mode, base, offset, scaled):
                 base = self.handles[RegisterName(base.name)]
-                base_il = il.reg(ARCH_SIZE, base, loc=self.parent.loc)
+                base_il = base.get()
                 if isinstance(offset, Register):
                     offset = self.handles[RegisterName(offset.name)]
-                    offset_il = il.reg(ARCH_SIZE, offset, loc=self.parent.loc)
+                    offset_il = offset.get()
                 else:
                     offset_il = self.il.const(ARCH_SIZE, offset, loc=self.parent.loc)
                 if scaled:
@@ -303,9 +325,9 @@ class InputOperand:
             return self.address_expr
         return None
     
-    def free(self, allocator: TempReadAllocator):
-        for reg in self.handles:
-            allocator.free(reg)
+    def free(self):
+        for handle in self.handles.values():
+            handle.free()
         self.handles.clear()
 
 class Operation:
@@ -338,18 +360,18 @@ class Operation:
     def register_output(self, output: 'OutputOperand'):
         self._outputs.append(output)
 
-    def store(self, allocator: TempReadAllocator, il: LowLevelILFunction):
+    def store(self, allocator: RegTempAllocator, il: LowLevelILFunction):
         if self._stored: return
         self._lift()
         stored_exprs = list()
         for output_expr in self._output_exprs:
-            temp_reg = allocator.alloc(loc=self.parent.loc)
-            store_temp(temp_reg, output_expr, il, loc=self.parent.loc)
-            stored_exprs.append(il.reg(ARCH_SIZE, temp_reg, loc=self.parent.loc))
+            temp_handle = allocator.alloc(loc=self.parent.loc)
+            store_temp(temp_handle.reg, output_expr, il, loc=self.parent.loc)
+            stored_exprs.append(temp_handle.get())
         self._output_exprs = stored_exprs
         self._stored = True
         for input in self.inputs:
-            input.free(allocator)
+            input.free()
 
     def get_statements(self) -> Iterable[ExpressionIndex]:
         self._lift()
@@ -380,24 +402,28 @@ class OutputOperand:
                     return False
         return True
 
-    def write(self, il:LowLevelILFunction, allocator: TempAllocator):
+    def write(self, il:LowLevelILFunction, temp_alloc: TempAllocator, reg_alloc: RegTempAllocator):
         if not self._is_writing(): return
         value = self.operation.get(self)
         done = True
         match self.src:
             case RegisterOperand(reg):
+                reg_alloc.notify_write(RegisterName(reg.name))
                 if self.parent.src.opcode in ('mvkh', 'mvklh'):
                     il.append(il.set_reg(HW_SIZE, RegisterName(reg.name+'H'), value, loc=self.parent.loc))
                 else:
                     il.append(il.set_reg(ARCH_SIZE, RegisterName(reg.name), value, loc=self.parent.loc))
             case RegisterPairOperand(high, low):
                 if self._high:
+                    reg_alloc.notify_write(RegisterName(high.name))
                     il.append(il.set_reg(ARCH_SIZE, RegisterName(high.name), value, loc=self.parent.loc))
                 else:
                     self._high = True
+                    reg_alloc.notify_write(RegisterName(low.name))
                     il.append(il.set_reg(ARCH_SIZE, RegisterName(low.name), value, loc=self.parent.loc))
                     done = False
             case MemoryOperand(_, base, _, _):
+                reg_alloc.notify_write(RegisterName(base.name))
                 il.append(il.set_reg(ARCH_SIZE, RegisterName(base.name), value, loc=self.parent.loc))
             case ControlRegisterOperand(reg):
                 if reg == ControlRegister.PCE1:
@@ -409,7 +435,11 @@ class OutputOperand:
                 else:
                     raise NotImplementedError('control register writes')
         if done and is_temp_reg(value, il):
-            allocator.free(il.get_expr(value).src) # type: ignore
+            temp_alloc.free(il.get_expr(value).src) # type: ignore
+
+class ReadHandle:
+    def read(self, allocator: RegTempAllocator):
+        raise NotImplementedError
 
 class LiftInstruction:
     def __init__(self, src: Instruction, il: LowLevelILFunction) -> None:
@@ -464,9 +494,6 @@ class LiftInstruction:
             # branches don't work differently, but their delay is similar
             self._writes.append((5, pc_output))
 
-        if self.is_conditional():
-            self._condition_reg = RegisterHandle(unwrap(self.src.condition.register))
-
     def is_first(self) -> bool:
         # For load/store in same cycle, load occurs first.
         return self.src.opcode.lower().startswith('ld')
@@ -475,16 +502,26 @@ class LiftInstruction:
         if self.__unimplemented: return False
         return self.src.condition.register is not None
 
-    def get_condition(self) -> list[tuple[int, RegisterHandle]]:
-        if self._condition_reg is not None:
-            return [(0, self._condition_reg)]
+    class _ConditionReadHandle(ReadHandle):
+        def __init__(self, parent: LiftInstruction) -> None:
+            self.parent = parent
+            self.condition_reg = RegisterName(unwrap(self.parent.src.condition.register).name)
+
+        def read(self, allocator: RegTempAllocator):
+            self.parent._condition_reg = allocator.alloc(
+                self.condition_reg,
+                self.parent.loc)
+
+    def get_condition(self) -> list[tuple[int, ReadHandle]]:
+        if self.is_conditional():
+            return [(0, LiftInstruction._ConditionReadHandle(self))]
         else:
             return []
         
     def get_condition_expr(self) -> ExpressionIndex:
         assert self.is_conditional()
         zero = self._il.const(ARCH_SIZE, 0)
-        cond_reg = self._il.reg(ARCH_SIZE, unwrap(self._condition_reg).get(), self.loc)
+        cond_reg = unwrap(self._condition_reg).get()
         if self.src.condition.branch:
             cond = self._il.compare_equal(ARCH_SIZE, cond_reg, zero, self.loc)
         else:
@@ -526,20 +563,20 @@ def _end_condition(false_label: Optional[LowLevelILLabel], il: LowLevelILFunctio
 def _lift_cycle(ctx: LiftingContext):
     '''Translate one cycle of pipeline execution to IL'''
     for handle in ctx.cond_queue.dequeue():
-        # handle.read(ctx.read_alloc)
+        # handle.read(ctx.reg_alloc)
         pass
     for input in ctx.read_queue.dequeue():
-        input.read(ctx.read_alloc)
+        input.read(ctx.reg_alloc)
     for operation in ctx.op_queue.dequeue():
         # false_label = _check_condition(operation.parent, ctx.il)
         for statement in operation.get_statements():
             ctx.il.append(statement)
         if operation.has_outputs():
-            operation.store(ctx.read_alloc, ctx.il)
+            operation.store(ctx.reg_alloc, ctx.il)
         # _end_condition(false_label, ctx.il)
     for output in ctx.write_queue.dequeue():
         # false_label = _check_condition(output.parent, ctx.il)
-        output.write(ctx.il, ctx.temp_alloc)
+        output.write(ctx.il, ctx.temp_alloc, ctx.reg_alloc)
         # _end_condition(false_label, ctx.il)
 
 def _drain_queues(ctx: LiftingContext):
