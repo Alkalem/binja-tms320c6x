@@ -38,8 +38,6 @@ from .util import get_delay_consumption, unwrap
 from .disassembler.types import Instruction, Operand, ImmediateOperand, RegisterOperand, MemoryOperand, Register, AddressingMode, RW, FuncUnitsOperand, ControlRegisterOperand, RegisterPairOperand, ControlRegister
 
 
-#TODO: lift conditional execution
-
 ## Temporary IL registers
 
 def store_temp(reg_id, value, il: LowLevelILFunction, loc=None):
@@ -102,7 +100,7 @@ class RegTempAllocator:
             self.temp_alloc.free(reg)
             del self.references[reg]
             self.handles[handle.name].remove(handle)
-            if self.active_handles[handle.name] == handle:
+            if self.active_handles.get(handle.name, None) == handle:
                 del self.active_handles[handle.name]
 
     def notify_write(self, name: RegisterName):
@@ -385,6 +383,9 @@ class Operation:
     
     def has_outputs(self) -> bool:
         return len(self._outputs) > 0
+    
+    def free(self):
+        self.parent.free(self)
 
 class OutputOperand:
     def __init__(self, src:Operand, operation: Operation, parent: LiftInstruction) -> None:
@@ -436,6 +437,8 @@ class OutputOperand:
                     raise NotImplementedError('control register writes')
         if done and is_temp_reg(value, il):
             temp_alloc.free(il.get_expr(value).src) # type: ignore
+        if done:
+            self.parent.free(self)
 
 class ReadHandle:
     def read(self, allocator: RegTempAllocator):
@@ -537,6 +540,13 @@ class LiftInstruction:
     def get_writes(self) -> list[tuple[int, OutputOperand]]:
         return self._writes
     
+    def free(self, part: Operation | OutputOperand):
+        if part == self._operation and len(self._writes): return
+        if part != self._operation and part != max(self._writes, key=lambda w: w[0])[1]: return
+        if self._condition_reg is not None:
+            unwrap(self._condition_reg).free()
+        self._condition_reg = None
+    
     @property
     def loc(self) -> ILSourceLocation:
         return self._loc_
@@ -563,21 +573,21 @@ def _end_condition(false_label: Optional[LowLevelILLabel], il: LowLevelILFunctio
 def _lift_cycle(ctx: LiftingContext):
     '''Translate one cycle of pipeline execution to IL'''
     for handle in ctx.cond_queue.dequeue():
-        # handle.read(ctx.reg_alloc)
-        pass
+        handle.read(ctx.reg_alloc)
     for input in ctx.read_queue.dequeue():
         input.read(ctx.reg_alloc)
     for operation in ctx.op_queue.dequeue():
-        # false_label = _check_condition(operation.parent, ctx.il)
+        false_label = _check_condition(operation.parent, ctx.il)
         for statement in operation.get_statements():
             ctx.il.append(statement)
         if operation.has_outputs():
             operation.store(ctx.reg_alloc, ctx.il)
-        # _end_condition(false_label, ctx.il)
+        operation.free()
+        _end_condition(false_label, ctx.il)
     for output in ctx.write_queue.dequeue():
-        # false_label = _check_condition(output.parent, ctx.il)
+        false_label = _check_condition(output.parent, ctx.il)
         output.write(ctx.il, ctx.temp_alloc, ctx.reg_alloc)
-        # _end_condition(false_label, ctx.il)
+        _end_condition(false_label, ctx.il)
 
 def _drain_queues(ctx: LiftingContext):
     while any(map(lambda q: len(q) > 0, (ctx.read_queue, ctx.op_queue, ctx.write_queue))):
