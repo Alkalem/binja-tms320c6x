@@ -203,14 +203,10 @@ class TMS320C6x(TMS320C6xBaseArch):
         else:
             end_addr = addr + len(data)
             fp_addr = end_addr - (end_addr % FP_SIZE)
-            num_words = (len(data) + HW_SIZE) // ARCH_SIZE
-            if fp_addr in context:
-                extended_data = data + b'\x00' * (FP_SIZE  - (end_addr % FP_SIZE) - ARCH_SIZE) + context[fp_addr]
-            else:
-                extended_data = data + b'\x00' * (FP_SIZE  - (end_addr % FP_SIZE))
-            instructions = self.disasm.disasm(extended_data, addr, num_words)
-
-        #TODO: add SPLOOP iteration index for SPKERNEL[R] disassembly
+            header = context.headers.get(fp_addr, None)
+            # SPKERNEL(R) is always first in EP
+            sploop_ii = context.sploop_ii.get(addr, 0)
+            instructions = self.disasm.disasm(data, addr, end=end_addr, header=header, sploop_ii=sploop_ii)
 
         tokens = []
         offset = 0
