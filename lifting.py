@@ -27,6 +27,7 @@ from binaryninja.variable import PossibleValueSet, ValueRange
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Optional, Sequence, Iterable, Generator, List, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -34,7 +35,7 @@ if TYPE_CHECKING:
 from .arch import FunctionLifterContext
 from .constants import ARCH_SIZE, HW_SIZE, DW_SIZE, INSTRUCTION_DELAY, FP_SIZE
 from .instruction import Disassembler
-from .util import get_delay_consumption, unwrap
+from .util import get_delay_consumption, is_branch, unwrap
 from .disassembler.types import Instruction, Operand, ImmediateOperand, RegisterOperand, MemoryOperand, Register, AddressingMode, RW, FuncUnitsOperand, ControlRegisterOperand, RegisterPairOperand, ControlRegister
 
 
@@ -45,10 +46,14 @@ def store_temp(reg_id, value, il: LowLevelILFunction, loc=None):
     il.append(il.set_reg(ARCH_SIZE, tmp, value, loc=loc))
 
 class TempAllocator:
+    GLOBAL_BASE = 0x100
+
     def __init__(self, arch) -> None:
         self.arch = arch
         self.max_temp_reg:int = 0
         self.free_temp_regs:List[int] = list()
+        self.max_global: int = self.GLOBAL_BASE
+        self.reserved_regs: dict[str, ILRegister] = dict()
     
     def alloc(self) -> ILRegister:
         if len(self.free_temp_regs) == 0:
@@ -59,8 +64,18 @@ class TempAllocator:
         return ILRegister(self.arch, LLIL_TEMP(reg_id))
 
     def free(self, tmp):
+        if LLIL_GET_TEMP_REG_INDEX(tmp) >= self.GLOBAL_BASE: return
         if LLIL_GET_TEMP_REG_INDEX(tmp) in self.free_temp_regs: return
         self.free_temp_regs.append(LLIL_GET_TEMP_REG_INDEX(tmp))
+
+    def get_global(self, key: str) -> ILRegister:
+        if key in self.reserved_regs:
+            return self.reserved_regs[key]
+        else:
+            reg = ILRegister(self.arch, LLIL_TEMP(self.max_global))
+            self.reserved_regs[key] = reg
+            self.max_global += 1
+            return reg
 
 class RegTempAllocator:
     def __init__(self, il: LowLevelILFunction, temp_alloc: TempAllocator) -> None:
@@ -157,9 +172,15 @@ class LiftingContext:
         self.read_queue:LiftingQueue[InputOperand] = LiftingQueue(32)
         self.op_queue:LiftingQueue[Operation] = LiftingQueue(32)
         self.write_queue:LiftingQueue[OutputOperand] = LiftingQueue(32)
+        self.branch_queue:LiftingQueue[LiftBranch] = LiftingQueue(16)
         self.temp_alloc = TempAllocator(arch)
         self.reg_alloc = RegTempAllocator(il, self.temp_alloc)
 
+class ILBranchType(Enum):
+    Jump = 0
+    Call = 1
+    Tailcall = 2
+    Return = 3
 
 def _get_bin_op_cb(il: LowLevelILFunction, op, loc: ILSourceLocation):
     def __lift(src1: ExpressionIndex, src2: ExpressionIndex) -> Sequence[ExpressionIndex]:
@@ -333,7 +354,7 @@ class Operation:
         self.inputs = inputs
         self.callback = callback
         self.parent = parent
-        self._outputs = list()
+        self._outputs: list[Output] = list()
         self._lifted = False
         self._statements: Sequence[ExpressionIndex] = tuple()
         self._output_exprs: Sequence[ExpressionIndex] = tuple()
@@ -355,7 +376,7 @@ class Operation:
         self._output_exprs = tuple(output_exprs)
         self._lifted = True
 
-    def register_output(self, output: 'OutputOperand'):
+    def register_output(self, output: 'Output'):
         self._outputs.append(output)
 
     def store(self, allocator: RegTempAllocator, il: LowLevelILFunction):
@@ -375,7 +396,7 @@ class Operation:
         self._lift()
         return self._statements
 
-    def get(self, output: 'OutputOperand') -> ExpressionIndex:
+    def get(self, output: 'Output') -> ExpressionIndex:
         if output not in self._outputs:
             raise ValueError('requested output needs to be registered')
         self._lift()
@@ -427,13 +448,6 @@ class OutputOperand:
                 reg_alloc.notify_write(RegisterName(base.name))
                 il.append(il.set_reg(ARCH_SIZE, RegisterName(base.name), value, loc=self.parent.loc))
             case ControlRegisterOperand(reg):
-                if reg == ControlRegister.PCE1:
-                    #HACK: write access is not allowed, used to model jumps
-                    branch = il.call
-                    if str(self.parent.src.operands[0]) == 'B3':
-                        branch = il.ret
-                    il.append(branch(value, loc=self.parent.loc))
-                else:
                     raise NotImplementedError('control register writes')
         if done and is_temp_reg(value, il):
             temp_alloc.free(il.get_expr(value).src) # type: ignore
@@ -445,14 +459,16 @@ class ReadHandle:
         raise NotImplementedError
 
 class LiftInstruction:
-    def __init__(self, src: Instruction, il: LowLevelILFunction) -> None:
+    def __init__(self, src: Instruction, ctx: LiftingContext) -> None:
         self.src = src
+        il = ctx.il
+        self._ctx = ctx
         self._il = il
         self._inputs: list[InputOperand] = list()
         self._reads = list()
         self._writes = list()
-        self._output: OutputOperand | None = None
         self._lift_cycle: int = 0
+        self._last_output: int = -1
         self._condition_reg: Optional[RegisterHandle] = None
         self._loc_ = _addr2loc(src.address)
         self.__unimplemented = True
@@ -486,16 +502,22 @@ class LiftInstruction:
                 output = OutputOperand(operand, self._operation, self)
                 # Optional address write is in first cycle.
                 self._writes.append((0, output))
+                self._last_output = max(self._last_output, 0)
             elif operand.access_info.rw in (RW.write, RW.read_write):
-                self._output = OutputOperand(operand, self._operation, self)
+                output = OutputOperand(operand, self._operation, self)
                 if operand.access_info.low_first:
-                    self._writes.append((operand.access_info.low_first-1, self._output))
+                    write_cycle = operand.access_info.low_first-1
+                    self._writes.append((operand.access_info.low_first-1, output))
+                    self._last_output = max(self._last_output, write_cycle)
                 if operand.access_info.high_first:
-                    self._writes.append((operand.access_info.high_first-1, self._output))
-        if _is_branch(src):
-            pc_output = OutputOperand(ControlRegisterOperand(ControlRegister.PCE1), self._operation, self)
-            # branches don't work differently, but their delay is similar
-            self._writes.append((5, pc_output))
+                    write_cycle = operand.access_info.high_first-1
+                    self._writes.append((write_cycle, output))
+                    self._last_output = max(self._last_output, write_cycle)
+        if is_branch(src):
+            self._last_output = max(self._last_output, 5)
+
+    def _has_output(self) -> bool:
+        return self._lift_cycle <= self._last_output
 
     def is_first(self) -> bool:
         # For load/store in same cycle, load occurs first.
@@ -540,9 +562,19 @@ class LiftInstruction:
     def get_writes(self) -> list[tuple[int, OutputOperand]]:
         return self._writes
     
-    def free(self, part: Operation | OutputOperand):
-        if part == self._operation and len(self._writes): return
-        if part != self._operation and part != max(self._writes, key=lambda w: w[0])[1]: return
+    def get_branch(self) -> Optional[LiftBranch]:
+        if is_branch(self.src) and not self.__unimplemented:
+            branch_type = ILBranchType.Jump
+            if str(self.src.operands[0]) == 'B3':
+                branch_type = ILBranchType.Return
+            return LiftBranch(self, self._operation, branch_type, self._ctx)
+        return None
+    
+    def free(self, part: Operation | Output):
+        if part == self._operation and (self._has_output()): return
+        is_write = part in map(lambda w: w[1], self._writes)
+        is_max_write = part == max(reversed(self._writes), key=lambda w: w[0], default=(0,0))[1]
+        if is_write and (not is_max_write or is_branch(self.src)): return
         if self._condition_reg is not None:
             unwrap(self._condition_reg).free()
         self._condition_reg = None
@@ -550,12 +582,36 @@ class LiftInstruction:
     @property
     def loc(self) -> ILSourceLocation:
         return self._loc_
+    
+class LiftBranch:
+    def __init__(self, parent: LiftInstruction, op: Operation, branch_type: ILBranchType, ctx: LiftingContext, delay: int = 5) -> None:
+        self.parent = parent
+        self.operation = op
+        self.type = branch_type
+        self.ctx = ctx
+        self.delay = delay
+
+        op.register_output(self)
+    
+    def lift(self):
+        il = self.ctx.il
+        value = self.operation.get(self)
+        match self.type:
+            case ILBranchType.Jump:
+                branch = il.jump
+            case ILBranchType.Call:
+                branch = il.call
+            case ILBranchType.Return:
+                branch = il.ret
+            case ILBranchType.Tailcall:
+                branch = il.tailcall
+        il.append(branch(value, loc=self.parent.loc))
+        self.parent.free(self)
+
+type Output = OutputOperand | LiftBranch
 
 def _addr2loc(address: int) -> ILSourceLocation:
     return ILSourceLocation(address, -1)
- 
-def _is_branch(instr: Instruction) -> bool:
-    return instr.opcode in ('b', 'bpos', 'bdec', 'callp')
 
 def _check_condition(instruction: LiftInstruction, il: LowLevelILFunction) -> Optional[LowLevelILLabel]:
     if not instruction.is_conditional():
@@ -588,6 +644,8 @@ def _lift_cycle(ctx: LiftingContext):
         false_label = _check_condition(output.parent, ctx.il)
         output.write(ctx.il, ctx.temp_alloc, ctx.reg_alloc)
         _end_condition(false_label, ctx.il)
+    for branch in ctx.branch_queue.dequeue():
+        pass
 
 def _drain_queues(ctx: LiftingContext):
     while any(map(lambda q: len(q) > 0, (ctx.read_queue, ctx.op_queue, ctx.write_queue))):
@@ -595,7 +653,7 @@ def _drain_queues(ctx: LiftingContext):
 
 def lift_ep(ctx: LiftingContext, packet: list[Instruction]):
     # 1. Convert instructions to helper objects for lifting
-    lift_packet = [LiftInstruction(instr, ctx.il) for instr in packet
+    lift_packet = [LiftInstruction(instr, ctx) for instr in packet
             if not instr.is_fp_header()] # do not lift headers
 
     # 2. Enqueue parts of the EPs instructions in lifting queues
@@ -604,7 +662,10 @@ def lift_ep(ctx: LiftingContext, packet: list[Instruction]):
         ctx.read_queue.enqueue(lift_instr.get_reads())
         ctx.op_queue.enqueue([lift_instr.get_operation()], lift_instr.is_first())
         #HACK: front=True is workaround for branch lifting
-        ctx.write_queue.enqueue(lift_instr.get_writes(), front=True)
+        ctx.write_queue.enqueue(lift_instr.get_writes())
+        branch = lift_instr.get_branch()
+        if branch:
+            ctx.branch_queue.enqueue([(branch.delay, branch)])
     
     # 3. Translate cycles to IL, multiple in case of multi-cycle NOP
     delay = max(map(get_delay_consumption, packet))
@@ -651,12 +712,14 @@ def lift_function(arch: TMS320C6xBaseArch, function: LowLevelILFunction, context
     bv = unwrap(function.view)
 
     for block in context.blocks:
+        function.add_label_for_address(arch, block.start)
+
+    for block in context.blocks:
         function.set_current_source_block(block)
         
         context.prepare_block_translation(function, arch, block.start)
         label = function.get_label_for_address(arch, block.start)
-        if label is not None:
-            function.mark_label(label)
+        function.mark_label(unwrap(label))
 
         begin_instruction_count = len(function)
 
