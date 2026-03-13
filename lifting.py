@@ -36,7 +36,7 @@ from .arch import FunctionLifterContext
 from .constants import ARCH_SIZE, HW_SIZE, DW_SIZE, INSTRUCTION_DELAY, FP_SIZE
 from .instruction import Disassembler
 from .util import get_delay_consumption, is_branch, unwrap
-from .disassembler.types import Instruction, Operand, ImmediateOperand, RegisterOperand, MemoryOperand, Register, AddressingMode, RW, FuncUnitsOperand, ControlRegisterOperand, RegisterPairOperand, ControlRegister
+from .disassembler.types import Instruction, Operand, ImmediateOperand, RegisterOperand, MemoryOperand, Register, AddressingMode, RW, FuncUnitsOperand, ControlRegisterOperand, RegisterPairOperand, ControlRegister, ConditionType
 
 
 ## Temporary IL registers
@@ -168,13 +168,14 @@ class LiftingContext:
         self.arch = arch
         self.il = il
         self.settings = settings
-        self.cond_queue:LiftingQueue[ReadHandle] = LiftingQueue(32)
+        self.cond_queue:LiftingQueue[LiftInstruction] = LiftingQueue(32)
         self.read_queue:LiftingQueue[InputOperand] = LiftingQueue(32)
         self.op_queue:LiftingQueue[Operation] = LiftingQueue(32)
         self.write_queue:LiftingQueue[OutputOperand] = LiftingQueue(32)
         self.branch_queue:LiftingQueue[LiftBranch] = LiftingQueue(16)
         self.temp_alloc = TempAllocator(arch)
         self.reg_alloc = RegTempAllocator(il, self.temp_alloc)
+        self.conditional_handler = ConditionalHandler(il, self.reg_alloc)
 
 class ILBranchType(Enum):
     Jump = 0
@@ -263,6 +264,60 @@ class LiftingQueue[T]:
         
     def __len__(self) -> int:
         return len(self.cycle_queues)
+    
+## Conditional Handler:
+## - reserve required conditional registers (instruction based)
+## - track condition register usage and save if necessary
+## - surround instruction part lifting with conditional blocks
+
+class ConditionalHandler:
+    def __init__(self, il: LowLevelILFunction, allocator: RegTempAllocator) -> None:
+        self._il = il
+        self._allocator = allocator
+        self._assignments: dict[int, RegisterHandle] = dict()
+
+    @staticmethod
+    def _is_conditional(instr: LiftInstruction) -> bool:
+        return instr.condition.register is not None
+    
+    def _free(self, instr: LiftInstruction, part: Operation | Output):
+        if not instr.is_last_part(part): return
+        self._assignments[instr.address].free()
+        del self._assignments[instr.address]
+    
+    def _get_condition_expr(self, instr: LiftInstruction) -> ExpressionIndex:
+        zero = self._il.const(ARCH_SIZE, 0)
+        cond_reg = self._assignments[instr.address].get()
+        if instr.condition.branch:
+            cond = self._il.compare_equal(ARCH_SIZE, cond_reg, zero, instr.loc)
+        else:
+            cond = self._il.compare_not_equal(ARCH_SIZE, cond_reg, zero, instr.loc)
+        return cond
+
+    def process(self, instr: LiftInstruction):
+        if not self._is_conditional(instr): return
+        assert instr.address not in self._assignments
+        condition_name = RegisterName(unwrap(instr.condition.register).name)
+        self._assignments[instr.address] = self._allocator.alloc(condition_name, instr.loc)
+
+    def begin_conditional(self, part: Operation | Output):
+        instr = part.parent
+        if not self._is_conditional(instr): return
+        assert instr.address in self._assignments
+        il = self._il
+        true_case = LowLevelILLabel()
+        false_case = LowLevelILLabel()
+        operand = self._get_condition_expr(instr)
+        il.append(il.if_expr(operand, true_case, false_case, instr.loc))
+        il.mark_label(true_case)
+        self._false_label = false_case
+    
+    def end_conditional(self, part: Operation | Output):
+        instr = part.parent
+        if not self._is_conditional(instr): return
+        self._il.mark_label(self._false_label)
+        self._free(instr, part)
+        return
 
 class InputOperand:
     def __init__(self, src: Operand, il: LowLevelILFunction, parent: LiftInstruction) -> None:
@@ -404,9 +459,6 @@ class Operation:
     
     def has_outputs(self) -> bool:
         return len(self._outputs) > 0
-    
-    def free(self):
-        self.parent.free(self)
 
 class OutputOperand:
     def __init__(self, src:Operand, operation: Operation, parent: LiftInstruction) -> None:
@@ -416,6 +468,9 @@ class OutputOperand:
         self._high = False
         if self._is_writing():
             operation.register_output(self)
+            self._done_ = False
+        else:
+            self._done_ = True
 
     def _is_writing(self) -> bool:
         match self.src:
@@ -449,10 +504,13 @@ class OutputOperand:
                 il.append(il.set_reg(ARCH_SIZE, RegisterName(base.name), value, loc=self.parent.loc))
             case ControlRegisterOperand(reg):
                     raise NotImplementedError('control register writes')
+        self._done_ = done
         if done and is_temp_reg(value, il):
             temp_alloc.free(il.get_expr(value).src) # type: ignore
-        if done:
-            self.parent.free(self)
+
+    @property
+    def done(self) -> bool:
+        return self._done_
 
 class ReadHandle:
     def read(self, allocator: RegTempAllocator):
@@ -469,7 +527,6 @@ class LiftInstruction:
         self._writes = list()
         self._lift_cycle: int = 0
         self._last_output: int = -1
-        self._condition_reg: Optional[RegisterHandle] = None
         self._loc_ = _addr2loc(src.address)
         self.__unimplemented = True
 
@@ -522,36 +579,6 @@ class LiftInstruction:
     def is_first(self) -> bool:
         # For load/store in same cycle, load occurs first.
         return self.src.opcode.lower().startswith('ld')
-    
-    def is_conditional(self) -> bool:
-        if self.__unimplemented: return False
-        return self.src.condition.register is not None
-
-    class _ConditionReadHandle(ReadHandle):
-        def __init__(self, parent: LiftInstruction) -> None:
-            self.parent = parent
-            self.condition_reg = RegisterName(unwrap(self.parent.src.condition.register).name)
-
-        def read(self, allocator: RegTempAllocator):
-            self.parent._condition_reg = allocator.alloc(
-                self.condition_reg,
-                self.parent.loc)
-
-    def get_condition(self) -> list[tuple[int, ReadHandle]]:
-        if self.is_conditional():
-            return [(0, LiftInstruction._ConditionReadHandle(self))]
-        else:
-            return []
-        
-    def get_condition_expr(self) -> ExpressionIndex:
-        assert self.is_conditional()
-        zero = self._il.const(ARCH_SIZE, 0)
-        cond_reg = unwrap(self._condition_reg).get()
-        if self.src.condition.branch:
-            cond = self._il.compare_equal(ARCH_SIZE, cond_reg, zero, self.loc)
-        else:
-            cond = self._il.compare_not_equal(ARCH_SIZE, cond_reg, zero, self.loc)
-        return cond
 
     def get_reads(self) -> list[tuple[int, InputOperand]]:
         return self._reads
@@ -570,14 +597,25 @@ class LiftInstruction:
             return LiftBranch(self, self._operation, branch_type, self._ctx)
         return None
     
-    def free(self, part: Operation | Output):
-        if part == self._operation and (self._has_output()): return
-        is_write = part in map(lambda w: w[1], self._writes)
-        is_max_write = part == max(reversed(self._writes), key=lambda w: w[0], default=(0,0))[1]
-        if is_write and (not is_max_write or is_branch(self.src)): return
-        if self._condition_reg is not None:
-            unwrap(self._condition_reg).free()
-        self._condition_reg = None
+    def is_last_part(self, part: Operation | Output) -> bool:
+        if part == self._operation:
+            return not self._has_output()
+        elif part in map(lambda w: w[1], self._writes):
+            assert isinstance(part, OutputOperand)
+            if not part.done: return False
+            is_max_write = part == max(reversed(self._writes), key=lambda w: w[0])[1]
+            return is_max_write and not is_branch(self.src)
+        elif isinstance(part, LiftBranch) and part.parent == self:
+            return True # branches are always last part of an instruction
+        return False
+    
+    @property
+    def address(self) -> int:
+        return self.src.address
+    
+    @property
+    def condition(self) -> ConditionType:
+        return self.src.condition
     
     @property
     def loc(self) -> ILSourceLocation:
@@ -606,44 +644,29 @@ class LiftBranch:
             case ILBranchType.Tailcall:
                 branch = il.tailcall
         il.append(branch(value, loc=self.parent.loc))
-        self.parent.free(self)
 
 type Output = OutputOperand | LiftBranch
 
 def _addr2loc(address: int) -> ILSourceLocation:
     return ILSourceLocation(address, -1)
 
-def _check_condition(instruction: LiftInstruction, il: LowLevelILFunction) -> Optional[LowLevelILLabel]:
-    if not instruction.is_conditional():
-        return None
-    true_case = LowLevelILLabel()
-    false_case = LowLevelILLabel()
-    il.append(il.if_expr(instruction.get_condition_expr(), true_case, false_case, instruction.loc))
-    il.mark_label(true_case)
-    return false_case
-
-def _end_condition(false_label: Optional[LowLevelILLabel], il: LowLevelILFunction):
-    if false_label is None: return
-    il.mark_label(false_label)
-
 def _lift_cycle(ctx: LiftingContext):
     '''Translate one cycle of pipeline execution to IL'''
-    for handle in ctx.cond_queue.dequeue():
-        handle.read(ctx.reg_alloc)
+    for instr in ctx.cond_queue.dequeue():
+        ctx.conditional_handler.process(instr)
     for input in ctx.read_queue.dequeue():
         input.read(ctx.reg_alloc)
     for operation in ctx.op_queue.dequeue():
-        false_label = _check_condition(operation.parent, ctx.il)
+        ctx.conditional_handler.begin_conditional(operation)
         for statement in operation.get_statements():
             ctx.il.append(statement)
         if operation.has_outputs():
             operation.store(ctx.reg_alloc, ctx.il)
-        operation.free()
-        _end_condition(false_label, ctx.il)
+        ctx.conditional_handler.end_conditional(operation)
     for output in ctx.write_queue.dequeue():
-        false_label = _check_condition(output.parent, ctx.il)
+        ctx.conditional_handler.begin_conditional(output)
         output.write(ctx.il, ctx.temp_alloc, ctx.reg_alloc)
-        _end_condition(false_label, ctx.il)
+        ctx.conditional_handler.end_conditional(output)
     for branch in ctx.branch_queue.dequeue():
         pass
 
@@ -658,10 +681,9 @@ def lift_ep(ctx: LiftingContext, packet: list[Instruction]):
 
     # 2. Enqueue parts of the EPs instructions in lifting queues
     for lift_instr in lift_packet:
-        ctx.cond_queue.enqueue(lift_instr.get_condition())
+        ctx.cond_queue.enqueue([(0, lift_instr)])
         ctx.read_queue.enqueue(lift_instr.get_reads())
         ctx.op_queue.enqueue([lift_instr.get_operation()], lift_instr.is_first())
-        #HACK: front=True is workaround for branch lifting
         ctx.write_queue.enqueue(lift_instr.get_writes())
         branch = lift_instr.get_branch()
         if branch:
