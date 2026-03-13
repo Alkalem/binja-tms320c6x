@@ -264,17 +264,13 @@ class LiftingQueue[T]:
         
     def __len__(self) -> int:
         return len(self.cycle_queues)
-    
-## Conditional Handler:
-## - reserve required conditional registers (instruction based)
-## - track condition register usage and save if necessary
-## - surround instruction part lifting with conditional blocks
 
 class ConditionalHandler:
     def __init__(self, il: LowLevelILFunction, allocator: RegTempAllocator) -> None:
         self._il = il
         self._allocator = allocator
         self._assignments: dict[int, RegisterHandle] = dict()
+        self._active_condition: Optional[ConditionType] = None
 
     @staticmethod
     def _is_conditional(instr: LiftInstruction) -> bool:
@@ -293,6 +289,11 @@ class ConditionalHandler:
         else:
             cond = self._il.compare_not_equal(ARCH_SIZE, cond_reg, zero, instr.loc)
         return cond
+    
+    def end_conditional(self):
+        if self._active_condition is not None:
+            self._il.mark_label(self._false_label)
+        self._active_condition = None
 
     def process(self, instr: LiftInstruction):
         if not self._is_conditional(instr): return
@@ -300,24 +301,23 @@ class ConditionalHandler:
         condition_name = RegisterName(unwrap(instr.condition.register).name)
         self._assignments[instr.address] = self._allocator.alloc(condition_name, instr.loc)
 
-    def begin_conditional(self, part: Operation | Output):
+    def before_lifting(self, part: Operation | Output):
         instr = part.parent
-        if not self._is_conditional(instr): return
+        if not self._is_conditional(instr):
+            self.end_conditional()
+            return
         assert instr.address in self._assignments
-        il = self._il
-        true_case = LowLevelILLabel()
-        false_case = LowLevelILLabel()
-        operand = self._get_condition_expr(instr)
-        il.append(il.if_expr(operand, true_case, false_case, instr.loc))
-        il.mark_label(true_case)
-        self._false_label = false_case
-    
-    def end_conditional(self, part: Operation | Output):
-        instr = part.parent
-        if not self._is_conditional(instr): return
-        self._il.mark_label(self._false_label)
+        if self._active_condition != instr.condition:
+            self.end_conditional()
+            il = self._il
+            true_case = LowLevelILLabel()
+            false_case = LowLevelILLabel()
+            operand = self._get_condition_expr(instr)
+            il.append(il.if_expr(operand, true_case, false_case, instr.loc))
+            il.mark_label(true_case)
+            self._active_condition = instr.condition
+            self._false_label = false_case
         self._free(instr, part)
-        return
 
 class InputOperand:
     def __init__(self, src: Operand, il: LowLevelILFunction, parent: LiftInstruction) -> None:
@@ -657,16 +657,14 @@ def _lift_cycle(ctx: LiftingContext):
     for input in ctx.read_queue.dequeue():
         input.read(ctx.reg_alloc)
     for operation in ctx.op_queue.dequeue():
-        ctx.conditional_handler.begin_conditional(operation)
+        ctx.conditional_handler.before_lifting(operation)
         for statement in operation.get_statements():
             ctx.il.append(statement)
         if operation.has_outputs():
             operation.store(ctx.reg_alloc, ctx.il)
-        ctx.conditional_handler.end_conditional(operation)
     for output in ctx.write_queue.dequeue():
-        ctx.conditional_handler.begin_conditional(output)
+        ctx.conditional_handler.before_lifting(output)
         output.write(ctx.il, ctx.temp_alloc, ctx.reg_alloc)
-        ctx.conditional_handler.end_conditional(output)
     for branch in ctx.branch_queue.dequeue():
         pass
 
@@ -705,6 +703,7 @@ def lift_instructions(arch, il: LowLevelILFunction , stream: Generator[Instructi
         lifted += sum(map(lambda instr: instr.size, packet))
         if end and packet[-1].address + packet[-1].size >= end: break
     _drain_queues(ctx)
+    ctx.conditional_handler.end_conditional()
     return lifted
 
 def _next_execution_packet(stream: Generator[Instruction, None, None], is_header_based: bool=False) -> List[Instruction]:
