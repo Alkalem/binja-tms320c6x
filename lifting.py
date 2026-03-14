@@ -222,6 +222,7 @@ OPCODE_CALLBACKS: dict[str, _lifting_gen_type] = {
     'add': get_add_cb,
     'addk': get_add_cb,
     'b': lambda *_: (lambda inp: (inp,)),
+    'bnop': lambda *_: (lambda inp, *_: (inp,)),
     'ldb': lambda il, loc: get_load_cb(il, loc, 1),
     'ldbu': lambda il, loc: get_load_cb(il, loc, 1, False),
     'ldh': lambda il, loc: get_load_cb(il, loc, HW_SIZE),
@@ -639,7 +640,6 @@ class LiftPartial(LiftInstruction):
         self._last_output: int = -1
         self._loc_ = _addr2loc(src.address)
         self._operation = None
-        self.__unimplemented = True
         if condition is None:
             self._condition_ = src.condition
         else:
