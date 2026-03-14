@@ -278,7 +278,8 @@ class ConditionalHandler:
     def _is_conditional(instr: LiftInstruction) -> bool:
         return instr.condition.register is not None
     
-    def _free(self, instr: LiftInstruction, part: Operation | Output):
+    def _free(self, instr: LiftInstruction, part: InputOperand | Operation | Output):
+        if isinstance(part, InputOperand): return
         if not instr.is_last_part(part): return
         self._assignments[instr.address].free()
         del self._assignments[instr.address]
@@ -303,7 +304,7 @@ class ConditionalHandler:
         condition_name = RegisterName(unwrap(instr.condition.register).name)
         self._assignments[instr.address] = self._allocator.alloc(condition_name, instr.loc)
 
-    def before_lifting(self, part: Operation | Output):
+    def before_lifting(self, part: InputOperand | Operation | Output):
         instr = part.parent
         if not self._is_conditional(instr):
             self.end_conditional()
@@ -690,6 +691,7 @@ def _lift_cycle(ctx: LiftingContext, store_branches: bool = False):
     for instr in ctx.cond_queue.dequeue():
         ctx.conditional_handler.process(instr)
     for input in ctx.read_queue.dequeue():
+        ctx.conditional_handler.before_lifting(input)
         input.read(ctx.reg_alloc)
     for operation in ctx.op_queue.dequeue():
         ctx.conditional_handler.before_lifting(operation)
