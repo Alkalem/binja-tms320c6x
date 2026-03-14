@@ -323,10 +323,10 @@ class InputOperand:
     def __init__(self, src: Operand, il: LowLevelILFunction, parent: LiftInstruction) -> None:
         self.src = src
         self.parent = parent
-        self.il = il
-        self.handles:dict[RegisterName, RegisterHandle] = dict()
+        self._il = il
+        self._handles:dict[RegisterName, RegisterHandle] = dict()
         self._is_read = False
-        self.low = True
+        self._low = True
 
     def read(self, allocator: RegTempAllocator):
         if self._is_read: return
@@ -335,41 +335,41 @@ class InputOperand:
         match self.src:
             case RegisterOperand(reg) | ControlRegisterOperand(reg):
                 reg_name = RegisterName(reg.name)
-                self.handles[reg_name] = allocator.alloc(reg_name, self.parent.loc)
+                self._handles[reg_name] = allocator.alloc(reg_name, self.parent.loc)
             case RegisterPairOperand(high, low):
-                if self.low:
-                    self._is_read = self.low = False
+                if self._low:
+                    self._is_read = self._low = False
                     reg_name = RegisterName(low.name)
                 else:
                     reg_name = RegisterName(high.name)
-                self.handles[reg_name] = allocator.alloc(reg_name, self.parent.loc)
+                self._handles[reg_name] = allocator.alloc(reg_name, self.parent.loc)
             case MemoryOperand(_, base, offset, _):
                 reg_name = RegisterName(base.name)
-                self.handles[reg_name] = allocator.alloc(reg_name, self.parent.loc)
+                self._handles[reg_name] = allocator.alloc(reg_name, self.parent.loc)
                 if isinstance(offset, Register):
                     reg_name = RegisterName(offset.name)
-                    self.handles[reg_name] = allocator.alloc(reg_name, self.parent.loc)
+                    self._handles[reg_name] = allocator.alloc(reg_name, self.parent.loc)
 
     def to_expr(self) -> ExpressionIndex:
-        il = self.il
+        il = self._il
         match self.src:
             case ImmediateOperand(value):
                 return il.const(ARCH_SIZE, value, loc=self.parent.loc)
             case RegisterOperand(reg) | ControlRegisterOperand(reg):
-                reg_handle = self.handles[RegisterName(reg.name)]
+                reg_handle = self._handles[RegisterName(reg.name)]
                 return reg_handle.get()
             case RegisterPairOperand(high, low):
-                hi = self.handles[RegisterName(high.name)]
-                lo = self.handles[RegisterName(low.name)]
+                hi = self._handles[RegisterName(high.name)]
+                lo = self._handles[RegisterName(low.name)]
                 return lo.get_pair(hi)
             case MemoryOperand(mode, base, offset, scaled):
-                base = self.handles[RegisterName(base.name)]
+                base = self._handles[RegisterName(base.name)]
                 base_il = base.get()
                 if isinstance(offset, Register):
-                    offset = self.handles[RegisterName(offset.name)]
+                    offset = self._handles[RegisterName(offset.name)]
                     offset_il = offset.get()
                 else:
-                    offset_il = self.il.const(ARCH_SIZE, offset, loc=self.parent.loc)
+                    offset_il = self._il.const(ARCH_SIZE, offset, loc=self.parent.loc)
                 if scaled:
                     offset_il = il.mult(ARCH_SIZE, 
                         offset_il,
@@ -399,10 +399,13 @@ class InputOperand:
             return self.address_expr
         return None
     
+    def is_reg_derived(self) -> bool:
+        return self._is_read and len(self._handles) > 0
+
     def free(self):
-        for handle in self.handles.values():
+        for handle in self._handles.values():
             handle.free()
-        self.handles.clear()
+        self._handles.clear()
 
 class Operation:
     def __init__(self, inputs: list[InputOperand], callback, parent: LiftInstruction) -> None:
@@ -437,12 +440,13 @@ class Operation:
     def store(self, allocator: RegTempAllocator, il: LowLevelILFunction):
         if self._stored: return
         self._lift()
-        stored_exprs = list()
-        for output_expr in self._output_exprs:
-            temp_handle = allocator.alloc(loc=self.parent.loc)
-            store_temp(temp_handle.reg, output_expr, il, loc=self.parent.loc)
-            stored_exprs.append(temp_handle.get())
-        self._output_exprs = stored_exprs
+        if any([i.is_reg_derived() for i in self.inputs]):
+            stored_exprs = list()
+            for output_expr in self._output_exprs:
+                temp_handle = allocator.alloc(loc=self.parent.loc)
+                store_temp(temp_handle.reg, output_expr, il, loc=self.parent.loc)
+                stored_exprs.append(temp_handle.get())
+            self._output_exprs = stored_exprs
         self._stored = True
         for input in self.inputs:
             input.free()
@@ -511,10 +515,6 @@ class OutputOperand:
     @property
     def done(self) -> bool:
         return self._done_
-
-class ReadHandle:
-    def read(self, allocator: RegTempAllocator):
-        raise NotImplementedError
 
 class LiftInstruction:
     def __init__(self, src: Instruction, ctx: LiftingContext) -> None:
@@ -633,6 +633,10 @@ class LiftBranch:
     
     def lift(self):
         il = self.ctx.il
+        # Similar may be required for indirect branches with known targets
+        target = self.parent.src.operands[0]
+        if isinstance(target, ImmediateOperand):
+            il.set_indirect_branches([(self.ctx.arch, target.value)])
         value = self.operation.get(self)
         match self.type:
             case ILBranchType.Jump:
@@ -666,7 +670,8 @@ def _lift_cycle(ctx: LiftingContext):
         ctx.conditional_handler.before_lifting(output)
         output.write(ctx.il, ctx.temp_alloc, ctx.reg_alloc)
     for branch in ctx.branch_queue.dequeue():
-        pass
+        ctx.conditional_handler.before_lifting(branch)
+        branch.lift()
 
 def _drain_queues(ctx: LiftingContext):
     while any(map(lambda q: len(q) > 0, (ctx.read_queue, ctx.op_queue, ctx.write_queue))):
