@@ -32,10 +32,11 @@ from typing import Any, Optional, Sequence, Iterable, Generator, List, TYPE_CHEC
 
 if TYPE_CHECKING:
     from .arch import TMS320C6xBaseArch
+    from .analysis import FunctionContext, BranchContext
 from .arch import FunctionLifterContext
 from .constants import ARCH_SIZE, HW_SIZE, DW_SIZE, INSTRUCTION_DELAY, FP_SIZE
 from .instruction import Disassembler
-from .util import get_delay_consumption, is_branch, unwrap
+from .util import get_delay_consumption, is_branch, unwrap, Wrapper
 from .disassembler.types import Instruction, Operand, ImmediateOperand, RegisterOperand, MemoryOperand, Register, AddressingMode, RW, FuncUnitsOperand, ControlRegisterOperand, RegisterPairOperand, ControlRegister, ConditionType
 
 
@@ -594,7 +595,11 @@ class LiftInstruction:
             branch_type = ILBranchType.Jump
             if str(self.src.operands[0]) == 'B3':
                 branch_type = ILBranchType.Return
-            return LiftBranch(self, self._operation, branch_type, self._ctx)
+            def cb() -> ExpressionIndex:
+                return self._operation.get(branch)
+            branch = LiftBranch(self, Wrapper(cb), branch_type, self._ctx)
+            self._operation.register_output(branch)
+            return branch
         return None
     
     def is_last_part(self, part: Operation | Output) -> bool:
@@ -620,24 +625,45 @@ class LiftInstruction:
     @property
     def loc(self) -> ILSourceLocation:
         return self._loc_
+
+class LiftPartial(LiftInstruction):
+    def __init__(self, src: Instruction, ctx: LiftingContext, condition: Optional[ConditionType] = None) -> None:
+        self.src = src
+        il = ctx.il
+        self._ctx = ctx
+        self._il = il
+        self._inputs: list[InputOperand] = list()
+        self._reads = list()
+        self._writes = list()
+        self._lift_cycle: int = 0
+        self._last_output: int = -1
+        self._loc_ = _addr2loc(src.address)
+        self._operation = None
+        self.__unimplemented = True
+        if condition is None:
+            self._condition_ = src.condition
+        else:
+            self._condition_ = unwrap(condition)
     
+    @property
+    def condition(self) -> ConditionType:
+        return self._condition_
+
 class LiftBranch:
-    def __init__(self, parent: LiftInstruction, op: Operation, branch_type: ILBranchType, ctx: LiftingContext, delay: int = 5) -> None:
+    def __init__(self, parent: LiftInstruction, target: Wrapper[ExpressionIndex], branch_type: ILBranchType, ctx: LiftingContext, delay: int = 5) -> None:
         self.parent = parent
-        self.operation = op
+        self.target = target
         self.type = branch_type
         self.ctx = ctx
         self.delay = delay
-
-        op.register_output(self)
     
     def lift(self):
         il = self.ctx.il
         # Similar may be required for indirect branches with known targets
-        target = self.parent.src.operands[0]
-        if isinstance(target, ImmediateOperand):
-            il.set_indirect_branches([(self.ctx.arch, target.value)])
-        value = self.operation.get(self)
+        target_op = self.parent.src.operands[0]
+        if isinstance(target_op, ImmediateOperand):
+            il.set_indirect_branches([(self.ctx.arch, target_op.value)])
+        target = self.target.get()
         match self.type:
             case ILBranchType.Jump:
                 branch = il.jump
@@ -647,14 +673,19 @@ class LiftBranch:
                 branch = il.ret
             case ILBranchType.Tailcall:
                 branch = il.tailcall
-        il.append(branch(value, loc=self.parent.loc))
+        il.append(branch(target, loc=self.parent.loc))
 
 type Output = OutputOperand | LiftBranch
 
 def _addr2loc(address: int) -> ILSourceLocation:
     return ILSourceLocation(address, -1)
 
-def _lift_cycle(ctx: LiftingContext):
+def _store_branch(branch: LiftBranch, ctx: LiftingContext):
+    instr = branch.parent
+    target = ctx.temp_alloc.get_global(f'target@{instr.address:08x}')
+    store_temp(target, branch.target.get(), ctx.il, instr.loc)
+
+def _lift_cycle(ctx: LiftingContext, store_branches: bool = False):
     '''Translate one cycle of pipeline execution to IL'''
     for instr in ctx.cond_queue.dequeue():
         ctx.conditional_handler.process(instr)
@@ -670,12 +701,15 @@ def _lift_cycle(ctx: LiftingContext):
         ctx.conditional_handler.before_lifting(output)
         output.write(ctx.il, ctx.temp_alloc, ctx.reg_alloc)
     for branch in ctx.branch_queue.dequeue():
-        ctx.conditional_handler.before_lifting(branch)
-        branch.lift()
+        if store_branches:
+            _store_branch(branch, ctx)
+        else:
+            ctx.conditional_handler.before_lifting(branch)
+            branch.lift()
 
-def _drain_queues(ctx: LiftingContext):
+def _drain_queues(ctx: LiftingContext, store_branches: bool = False):
     while any(map(lambda q: len(q) > 0, (ctx.read_queue, ctx.op_queue, ctx.write_queue))):
-        _lift_cycle(ctx)
+        _lift_cycle(ctx, store_branches)
 
 def lift_ep(ctx: LiftingContext, packet: list[Instruction]):
     # 1. Convert instructions to helper objects for lifting
@@ -697,7 +731,7 @@ def lift_ep(ctx: LiftingContext, packet: list[Instruction]):
     for _ in range(delay):
         _lift_cycle(ctx)
 
-def lift_instructions(arch, il: LowLevelILFunction , stream: Generator[Instruction, None, None], end: Optional[int]=None, ctx: Optional[LiftingContext]=None):
+def lift_instructions(arch, il: LowLevelILFunction , stream: Generator[Instruction, None, None], end: Optional[int]=None, ctx: Optional[LiftingContext]=None) -> int:
     if ctx is None:
         ctx = LiftingContext(arch, il, LiftingSettings(False))
     lifted = 0
@@ -727,12 +761,32 @@ def _next_execution_packet(stream: Generator[Instruction, None, None], is_header
             break # In versions that are not header-based, EPs cannot span FPs.
     return execution_packet
 
-def lift_basic_block(block: BasicBlock, ctx: LiftingContext) -> int:
-    return 0
+def _queue_pending_branches(pending_branches: list[BranchContext], ctx: LiftingContext):
+    for branch_context in pending_branches:
+        instr = LiftPartial(branch_context.src, ctx, branch_context.condition)
+        def cb() -> ExpressionIndex:
+            target = ctx.temp_alloc.get_global(f'target@{instr.address}')
+            return ctx.il.reg(ARCH_SIZE, target, instr.loc)
+        branch = LiftBranch(instr, Wrapper(cb), branch_context.type, ctx, branch_context.delay)
+        ctx.branch_queue.enqueue([(branch.delay, branch)])
+
+def lift_basic_block(ctx: LiftingContext, stream: Generator[Instruction, None, None], pending_branches: list[BranchContext], end: Optional[int]=None) -> int:
+    _queue_pending_branches(pending_branches, ctx)
+    lifted = 0
+    while True:
+        packet = _next_execution_packet(stream, ctx.settings.header_based)
+        if len(packet) == 0: break
+        lift_ep(ctx, packet)
+        lifted += sum(map(lambda instr: instr.size, packet))
+        if end and packet[-1].address + packet[-1].size >= end: break
+    _drain_queues(ctx, True)
+    ctx.conditional_handler.end_conditional()
+    return lifted
 
 def lift_function(arch: TMS320C6xBaseArch, function: LowLevelILFunction, context: FunctionLifterContext) -> bool:
     settings = LiftingSettings(header_based=True, simplify=False)
     ctx = LiftingContext(arch, function, settings)
+    function_context: FunctionContext = context.function_arch_context
 
     logger = context._logger
     bv = unwrap(function.view)
@@ -772,8 +826,13 @@ def lift_function(arch: TMS320C6xBaseArch, function: LowLevelILFunction, context
                 if remaining_fp_bytes: log_debug(f'Reading FP remainder at {opcode_end:08x}')
                 opcode += bv.read(opcode_end, remaining_fp_bytes)
 
+            if addr in function_context.branches:
+                pending_branches = function_context.branches[addr]
+            else:
+                pending_branches = []
+
             stream = arch.disasm.disasm(opcode, addr)
-            lifted_bytes = lift_instructions(arch, function, stream, end=block.end, ctx=ctx)
+            lifted_bytes = lift_basic_block(ctx, stream, pending_branches, end=block.end)
 
             if lifted_bytes is None or lifted_bytes <= 0:
                 function.append(function.undefined(loc=_addr2loc(addr)))

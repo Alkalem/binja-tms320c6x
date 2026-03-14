@@ -28,6 +28,7 @@ from typing import Dict, Optional, Set
 
 from .disassembler.types import ConditionType, Instruction, OperandType, RegisterOperand, Register, ControlRegisterOperand, ControlRegister, RW
 from .constants import ARCH_SIZE, FP_SIZE, HW_SIZE, BRANCH_DELAY
+from .lifting import ILBranchType
 from .util import get_delay_consumption
 
 
@@ -49,10 +50,18 @@ class SploopContext:
         if self.active and self.start == 0 and not i.parallel:
             self.start = i.address + i.size
 
+@dataclass
+class BranchContext:
+    condition: ConditionType
+    delay: int
+    type: ILBranchType
+    src: Instruction
+
 class FunctionContext:
     def __init__(self) -> None:
         self.headers: dict[int, bytes] = dict()
         self.sploop_ii: dict[int, int] = dict()
+        self.branches: dict[int, list[BranchContext]] = dict()
 
 __function_context_type = FunctionContext
 
@@ -103,6 +112,7 @@ def analyze_basic_blocks(arch, func: Function,
         pending_branches = list()
         if location in block_carried_branches:
             pending_branches = block_carried_branches[location]
+            __add_branches_to_context(function_context, location.addr, pending_branches)
         last_return_write = 255
         sploop_context = SploopContext()
         if location in sploop_blocks:
@@ -176,7 +186,7 @@ def analyze_basic_blocks(arch, func: Function,
                 sploop_context.process(instr)
                 for branch in info.branches:
                     branch = __resolve_branch(branch, instr)
-                    new_branch = (info.branch_delay, instr.condition, branch)
+                    new_branch = (info.branch_delay, instr, branch)
                     new_branches.append(new_branch)
 
                 next_func_addr = view.get_next_function_start_after(location.addr)
@@ -190,10 +200,10 @@ def analyze_basic_blocks(arch, func: Function,
                 if (not(is_parallel or header_next) or ends_block): break
             block.add_instruction_data(execution_packet)
             if len(new_branches):
-                for delay, condition, branch in new_branches:
+                for delay, instr, branch in new_branches:
                     while len(pending_branches) <= delay:
                         pending_branches.append(list())
-                    pending_branches[delay].append((condition, branch))
+                    pending_branches[delay].append((instr.condition, branch, instr))
 
             #TODO: handle function branches and branches with pending delay
             def handle_branch(branch:InstructionBranch, returns:bool, carried_branches):
@@ -299,7 +309,7 @@ def analyze_basic_blocks(arch, func: Function,
                 if len(pending_branches):
                     branch_slot = pending_branches.pop(0)
                     branch_slot = __unify_branches(branch_slot)
-                    for condition, branch in branch_slot:
+                    for condition, branch, _ in branch_slot:
                         carried_branches = __get_carried_branches(condition, pending_branches)
                         handle_branch(branch, last_return_write <= BRANCH_DELAY, carried_branches)
             last_return_write += delay_consumption
@@ -333,6 +343,24 @@ def __update_context(context: __function_context_type, end_addr: int, view: Bina
             fp_addr = end_addr - (end_addr % FP_SIZE)
             context.headers[fp_addr] = fp_header
 
+def __add_branches_to_context(context: __function_context_type, addr: int, branches: list[list[tuple[ConditionType, InstructionBranch, Instruction]]]):
+    branch_contexts = list()
+    for delay, slot in enumerate(branches):
+        for condition, branch, src in slot:
+            assert src is not None
+            match branch.type:
+                case BranchType.CallDestination:
+                    branch_type = ILBranchType.Call
+                case BranchType.FunctionReturn:
+                    branch_type = ILBranchType.Return
+                case (BranchType.ExceptionBranch | BranchType.UserDefinedBranch):
+                    continue
+                case _:
+                    branch_type = ILBranchType.Jump
+            branch_contexts.append(BranchContext(condition, delay, branch_type, src))
+    context.branches[addr] = branch_contexts
+    return
+
 def __addr_is_executable(view:BinaryView, addr:int) -> bool:
     return view.is_offset_executable(addr)
 
@@ -353,7 +381,7 @@ def __unify_branches(branches):
     unified_branches = list()
     require_false_branch = True
     conditions = set()
-    for condition, branch in branches:
+    for condition, branch, src in branches:
         if branch.type == BranchType.TrueBranch:
             if ConditionType(condition.value ^ 1) in conditions:
                 require_false_branch = False
@@ -370,7 +398,7 @@ def __unify_branches(branches):
             continue
         else:
             require_false_branch = False
-        unified_branches.append((condition, branch))
+        unified_branches.append((condition, branch, src))
     if require_false_branch:
         if len(conditions) == 1:
             condition = ConditionType(conditions.pop().value ^ 1)
@@ -378,14 +406,14 @@ def __unify_branches(branches):
             # Cannot express negation in one condition
             condition = ConditionType.RESERVED
         false_branch = InstructionBranch(BranchType.FalseBranch, 0, branch.arch)
-        unified_branches.append((condition, false_branch))
+        unified_branches.append((condition, false_branch, None))
     return unified_branches
 
 def __get_carried_branches(active_condition:ConditionType, pending_branches):
     carried_branches = list()
     for branch_slot in pending_branches:
         carried_branch_slot = list()
-        for condition, branch in branch_slot:
+        for condition, branch, src in branch_slot:
             if (branch.type == BranchType.FalseBranch
                     or condition == ConditionType.RESERVED):
                 continue # only carry true case
@@ -393,7 +421,7 @@ def __get_carried_branches(active_condition:ConditionType, pending_branches):
                     condition == ConditionType.UNCONDITIONAL):
                 carried_type = BranchType.UnconditionalBranch if branch.target else BranchType.IndirectBranch
                 carried_branch = InstructionBranch(carried_type, branch.target, branch.arch)
-                carried_branch_slot.append((ConditionType.UNCONDITIONAL, carried_branch))
+                carried_branch_slot.append((ConditionType.UNCONDITIONAL, carried_branch, src))
         carried_branches.append(carried_branch_slot)
     while len(carried_branches) and len(carried_branches[-1]) == 0:
         carried_branches.pop()

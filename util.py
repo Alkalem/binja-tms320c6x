@@ -14,7 +14,7 @@
 # You should have received a copy of the GNU General Public License along with
 # this program. If not, see <http://www.gnu.org/licenses/>.
 
-from typing import Optional
+from typing import Optional, Callable
 
 from .disassembler.types import Instruction, ImmediateOperand
 
@@ -52,3 +52,13 @@ class UnwrapError(ValueError):
 def unwrap[T](obj: Optional[T]) -> T:
     if obj is None: raise UnwrapError
     return obj
+
+class Wrapper[T]:
+    def __init__(self, cb: Callable[[], T]) -> None:
+        self._cb = cb
+        self._value = None
+
+    def get(self) -> T:
+        if self._value is None:
+            self._value = self._cb()
+        return self._value
