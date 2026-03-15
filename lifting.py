@@ -305,15 +305,21 @@ class ConditionalHandler:
         condition_name = RegisterName(unwrap(instr.condition.register).name)
         self._assignments[instr.address] = self._allocator.alloc(condition_name, instr.loc)
 
-    def before_lifting(self, part: InputOperand | Operation | Output):
+    def before_lifting(self, part: InputOperand | Operation | Output, parallel: bool = False):
         instr = part.parent
         if not self._is_conditional(instr):
             self.end_conditional()
             return
         assert instr.address in self._assignments
-        if self._active_condition != instr.condition:
+        il = self._il
+        if parallel and self._active_condition == ConditionType(instr.condition ^ 1):
+            end_label = LowLevelILLabel()
+            il.append(il.goto(end_label))
+            il.mark_label(self._false_label)
+            self._active_condition = instr.condition
+            self._false_label = end_label
+        elif self._active_condition != instr.condition:
             self.end_conditional()
-            il = self._il
             true_case = LowLevelILLabel()
             false_case = LowLevelILLabel()
             operand = self._get_condition_expr(instr)
@@ -321,7 +327,7 @@ class ConditionalHandler:
             il.mark_label(true_case)
             self._active_condition = instr.condition
             self._false_label = false_case
-        self._free(instr, part)
+        # self._free(instr, part)
 
 class InputOperand:
     def __init__(self, src: Operand, il: LowLevelILFunction, parent: LiftInstruction) -> None:
@@ -703,15 +709,21 @@ def _lift_cycle(ctx: LiftingContext, store_branches: bool = False):
     for output in ctx.write_queue.dequeue():
         ctx.conditional_handler.before_lifting(output)
         output.write(ctx.il, ctx.temp_alloc, ctx.reg_alloc)
+    first_branch = True
     for branch in ctx.branch_queue.dequeue():
         if store_branches:
             _store_branch(branch, ctx)
         else:
-            ctx.conditional_handler.before_lifting(branch)
+            if branch.type != ILBranchType.Call:
+                # HACK: ugly, but remaining IL needs to be added before non-call
+                ctx.conditional_handler.end_conditional()
+                _drain_queues(ctx, True)
+            ctx.conditional_handler.before_lifting(branch, not first_branch)
             branch.lift()
+            first_branch = False # same cycle branches should be parallel
 
 def _drain_queues(ctx: LiftingContext, store_branches: bool = False):
-    while any(map(lambda q: len(q) > 0, (ctx.read_queue, ctx.op_queue, ctx.write_queue))):
+    while any(map(lambda q: len(q) > 0, (ctx.read_queue, ctx.op_queue, ctx.write_queue, ctx.branch_queue))):
         _lift_cycle(ctx, store_branches)
 
 def lift_ep(ctx: LiftingContext, packet: list[Instruction]):
@@ -769,7 +781,7 @@ def _queue_pending_branches(pending_branches: list[BranchContext], ctx: LiftingC
         if branch_context.type == ILBranchType.UNDETERMINED: continue
         instr = LiftPartial(branch_context.src, ctx, branch_context.condition)
         def cb() -> ExpressionIndex:
-            target = ctx.temp_alloc.get_global(f'target@{instr.address}')
+            target = ctx.temp_alloc.get_global(f'target@{instr.address:08x}')
             return ctx.il.reg(ARCH_SIZE, target, instr.loc)
         branch = LiftBranch(instr, Wrapper(cb), branch_context.type, ctx, branch_context.delay)
         ctx.branch_queue.enqueue([(branch.delay, branch)])
