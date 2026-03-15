@@ -224,6 +224,11 @@ OPCODE_CALLBACKS: dict[str, _lifting_gen_type] = {
     'addk': get_add_cb,
     'b': lambda *_: (lambda inp: (inp,)),
     'bnop': lambda *_: (lambda inp, *_: (inp,)),
+    'cmpeq': lambda il, loc: _get_bin_op_cb(il, il.compare_equal, loc),
+    'cmpgt': lambda il, loc: _get_bin_op_cb(il, il.compare_signed_greater_than, loc),
+    'cmpgtu': lambda il, loc: _get_bin_op_cb(il, il.compare_unsigned_greater_than, loc),
+    'cmplt': lambda il, loc: _get_bin_op_cb(il, il.compare_signed_less_than, loc),
+    'cmpltu': lambda il, loc: _get_bin_op_cb(il, il.compare_unsigned_less_than, loc),
     'ldb': lambda il, loc: get_load_cb(il, loc, 1),
     'ldbu': lambda il, loc: get_load_cb(il, loc, 1, False),
     'ldh': lambda il, loc: get_load_cb(il, loc, HW_SIZE),
@@ -289,9 +294,9 @@ class ConditionalHandler:
         zero = self._il.const(ARCH_SIZE, 0)
         cond_reg = self._assignments[instr.address].get()
         if instr.condition.branch:
-            cond = self._il.compare_equal(ARCH_SIZE, cond_reg, zero, instr.loc)
-        else:
             cond = self._il.compare_not_equal(ARCH_SIZE, cond_reg, zero, instr.loc)
+        else:
+            cond = self._il.compare_equal(ARCH_SIZE, cond_reg, zero, instr.loc)
         return cond
     
     def end_conditional(self):
