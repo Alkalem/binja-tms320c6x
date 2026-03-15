@@ -29,7 +29,7 @@ from typing import Dict, Optional, Set
 from .disassembler.types import ConditionType, Instruction, OperandType, RegisterOperand, Register, ControlRegisterOperand, ControlRegister, RW
 from .constants import ARCH_SIZE, FP_SIZE, HW_SIZE, BRANCH_DELAY
 from .lifting import ILBranchType
-from .util import get_delay_consumption
+from .util import get_delay_consumption, unwrap
 
 
 @dataclass
@@ -63,8 +63,6 @@ class FunctionContext:
         self.sploop_ii: dict[int, int] = dict()
         self.branches: dict[int, list[BranchContext]] = dict()
 
-__function_context_type = FunctionContext
-
 def analyze_basic_blocks(arch, func: Function, 
         context: BasicBlockAnalysisContext) -> None:
     #TODO: sound error handling
@@ -80,7 +78,8 @@ def analyze_basic_blocks(arch, func: Function,
     blocks_to_process.append(ArchAndAddr(arch, start))
     seen_blocks.add(ArchAndAddr(arch, start))
 
-    function_context: __function_context_type = FunctionContext()
+    function_context: FunctionContext = FunctionContext()
+    specified_branches: dict[int, list[BranchContext]] = dict()
     context.function_arch_context = function_context
 
     total_size = 0
@@ -155,6 +154,8 @@ def analyze_basic_blocks(arch, func: Function,
                     target_block.add_pending_outgoing_edge(BranchType.UnconditionalBranch, location.addr, arch, True)
 
                     #TODO: check for pending branches at split point
+                    __add_branches_to_context(function_context, location.addr, pending_branches)
+                    __transfer_specified_branches(function_context, specified_branches.get(target_block.start, None), location.addr)
 
                     seen_blocks.add(location)
                     context.add_basic_block(split_block)
@@ -206,11 +207,12 @@ def analyze_basic_blocks(arch, func: Function,
                     pending_branches[delay].append((instr.condition, branch, instr))
 
             #TODO: handle function branches and branches with pending delay
-            def handle_branch(branch:InstructionBranch, returns:bool, carried_branches):
+            def handle_branch(branch: InstructionBranch, returns: bool, src: Optional[Instruction], carried_branches):
                 log_debug(f'Handling {branch.type.name} @{location.addr:08x} to {branch.target:08x} (return? {returns})')
                 nonlocal ends_block
+                target_type = branch.type
 
-                match branch.type:
+                match target_type:
                     case BranchType.UnconditionalBranch|BranchType.TrueBranch:
                         ends_block = True
                         if branch.target == 0: return
@@ -222,34 +224,39 @@ def analyze_basic_blocks(arch, func: Function,
 
                         if is_likely_call(branch, carried_branches, returns):
                             assert len(carried_branches) == 0
-                            block.add_pending_outgoing_edge(BranchType.CallDestination, branch.target, arch)
-                            ends_block = False
+                            target_type = BranchType.CallDestination
+                            block.add_pending_outgoing_edge(target_type, branch.target, arch)
+                            ends_block = not returns
                         else:
-                            block.add_pending_outgoing_edge(branch.type, branch.target, arch)
+                            block.add_pending_outgoing_edge(target_type, branch.target, arch)
                             add_target_to_process(branch.target, carried_branches)
+                        __specify_branch_type(function_context, block.start, target_type, unwrap(src), ends_block, specified_branches)
                     case BranchType.IndirectBranch:
                         ends_block = True
                         target_type = branch.type
                         if is_likely_call(branch, carried_branches, returns):
                             assert len(carried_branches) == 0
-                            ends_block = False
+                            target_type = BranchType.CallDestination
+                            ends_block = not returns
                         for indirect_branch in context.indirect_branches:
                             if (indirect_branch.source_addr != location.addr):
                                 continue
                             block.add_pending_outgoing_edge(target_type, indirect_branch.dest_addr, arch)
                             add_target_to_process(indirect_branch.dest_addr, carried_branches)
+                        __specify_branch_type(function_context, block.start, target_type, unwrap(src), ends_block, specified_branches)
                     case BranchType.FalseBranch:
                         if branch.target == 0:
                             # fallthrough false condition
                             ends_block = True
                             target = location.addr
-                            block.add_pending_outgoing_edge(BranchType.FalseBranch, target, arch, True)
+                            block.add_pending_outgoing_edge(target_type, target, arch, True)
                             if sploop_context.active:
                                 sploop_blocks[location] = sploop_context
                         else:
                             ends_block = True
                             target = branch.target
-                            block.add_pending_outgoing_edge(BranchType.FalseBranch, target, arch)
+                            block.add_pending_outgoing_edge(target_type, target, arch)
+                            __specify_branch_type(function_context, block.start, target_type, unwrap(src), ends_block, specified_branches)
                         add_target_to_process(target, carried_branches)
                     case BranchType.FunctionReturn:
                         ends_block = True
@@ -309,9 +316,9 @@ def analyze_basic_blocks(arch, func: Function,
                 if len(pending_branches):
                     branch_slot = pending_branches.pop(0)
                     branch_slot = __unify_branches(branch_slot)
-                    for condition, branch, _ in branch_slot:
+                    for condition, branch, src in branch_slot:
                         carried_branches = __get_carried_branches(condition, pending_branches)
-                        handle_branch(branch, last_return_write <= BRANCH_DELAY, carried_branches)
+                        handle_branch(branch, last_return_write <= BRANCH_DELAY, src, carried_branches)
             last_return_write += delay_consumption
             
             location = ArchAndAddr(arch, ep_location.addr + len(execution_packet))
@@ -335,7 +342,7 @@ def analyze_basic_blocks(arch, func: Function,
     if max_size_reached: context.max_size_reached = True
     context.finalize()
 
-def __update_context(context: __function_context_type, end_addr: int, view: BinaryView):
+def __update_context(context: FunctionContext, end_addr: int, view: BinaryView):
     if end_addr % FP_SIZE:
         header_suffix = view.read(end_addr, FP_SIZE - (end_addr % FP_SIZE))
         fp_header = header_suffix[-ARCH_SIZE:]
@@ -343,7 +350,7 @@ def __update_context(context: __function_context_type, end_addr: int, view: Bina
             fp_addr = end_addr - (end_addr % FP_SIZE)
             context.headers[fp_addr] = fp_header
 
-def __add_branches_to_context(context: __function_context_type, addr: int, branches: list[list[tuple[ConditionType, InstructionBranch, Instruction]]]):
+def __add_branches_to_context(context: FunctionContext, addr: int, branches: list[list[tuple[ConditionType, InstructionBranch, Instruction]]]):
     branch_contexts = list()
     for delay, slot in enumerate(branches):
         for condition, branch, src in slot:
@@ -356,10 +363,44 @@ def __add_branches_to_context(context: __function_context_type, addr: int, branc
                 case (BranchType.ExceptionBranch | BranchType.UserDefinedBranch):
                     continue
                 case _:
-                    branch_type = ILBranchType.Jump
+                    # Actual branch type requires additional information
+                    branch_type = ILBranchType.UNDETERMINED
             branch_contexts.append(BranchContext(condition, delay, branch_type, src))
     context.branches[addr] = branch_contexts
-    return
+
+def __specify_branch_type(context: FunctionContext, block_start: int, branch_type: BranchType, src: Instruction, ends_block: bool, specified_branches: dict[int, list[BranchContext]]):
+    if block_start not in context.branches: return
+    match branch_type:
+        case BranchType.CallDestination:
+            if ends_block:
+                il_type = ILBranchType.Tailcall
+            else:
+                il_type = ILBranchType.Call
+        case _:
+            il_type = ILBranchType.Jump
+    for branch_context in context.branches[block_start]:
+        if branch_context.src.address != src.address: continue
+        if branch_context.type != ILBranchType.UNDETERMINED: break
+        branch_context.type = il_type
+        break
+    else:
+        # Branch was issued in the same block, not pending at its beginning.
+        # The specified type should still be stored because block splitting
+        # could change this later and the analysis only happens once.
+        if block_start not in specified_branches:
+            specified_branches[block_start] = list()
+        specified_branches[block_start].append(BranchContext(src.condition, -1, il_type, src))
+
+def __transfer_specified_branches(context: FunctionContext, specified_branches: list[BranchContext], block_start: int):
+    for branch_context in context.branches[block_start]:
+        if branch_context.type != ILBranchType.UNDETERMINED: continue
+        target_a = branch_context.src.operands[0]
+        for specified_branch in specified_branches:
+            target_b = specified_branch.src.operands[0]
+            if target_a == target_b:
+                branch_context.type = specified_branch.type
+                specified_branches.remove(specified_branch)
+                break
 
 def __addr_is_executable(view:BinaryView, addr:int) -> bool:
     return view.is_offset_executable(addr)

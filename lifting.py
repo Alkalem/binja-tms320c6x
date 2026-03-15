@@ -183,6 +183,7 @@ class ILBranchType(Enum):
     Call = 1
     Tailcall = 2
     Return = 3
+    UNDETERMINED = -1
 
 def _get_bin_op_cb(il: LowLevelILFunction, op, loc: ILSourceLocation):
     def __lift(src1: ExpressionIndex, src2: ExpressionIndex) -> Sequence[ExpressionIndex]:
@@ -765,6 +766,7 @@ def _next_execution_packet(stream: Generator[Instruction, None, None], is_header
 
 def _queue_pending_branches(pending_branches: list[BranchContext], ctx: LiftingContext):
     for branch_context in pending_branches:
+        if branch_context.type == ILBranchType.UNDETERMINED: continue
         instr = LiftPartial(branch_context.src, ctx, branch_context.condition)
         def cb() -> ExpressionIndex:
             target = ctx.temp_alloc.get_global(f'target@{instr.address}')
