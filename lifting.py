@@ -47,7 +47,7 @@ def store_temp(reg_id, value, il: LowLevelILFunction, loc=None):
     il.append(il.set_reg(ARCH_SIZE, tmp, value, loc=loc))
 
 class TempAllocator:
-    GLOBAL_BASE = 0x100
+    GLOBAL_BASE = 100
 
     def __init__(self, arch) -> None:
         self.arch = arch
@@ -77,6 +77,11 @@ class TempAllocator:
             self.reserved_regs[key] = reg
             self.max_global += 1
             return reg
+
+def _get_global_key(name: str, address: int, aliases: dict[int, int]) -> str:
+    if address in aliases:
+        address = aliases[address]
+    return f'{name}@{address:08x}'
 
 class RegTempAllocator:
     def __init__(self, il: LowLevelILFunction, temp_alloc: TempAllocator) -> None:
@@ -177,6 +182,8 @@ class LiftingContext:
         self.temp_alloc = TempAllocator(arch)
         self.reg_alloc = RegTempAllocator(il, self.temp_alloc)
         self.conditional_handler = ConditionalHandler(il, self.reg_alloc)
+        self.aliases: dict[int, int] = dict()
+        '''Equivalent instructions at a different address'''
 
 class ILBranchType(Enum):
     Jump = 0
@@ -695,7 +702,8 @@ def _addr2loc(address: int) -> ILSourceLocation:
 
 def _store_branch(branch: LiftBranch, ctx: LiftingContext):
     instr = branch.parent
-    target = ctx.temp_alloc.get_global(f'target@{instr.address:08x}')
+    target = ctx.temp_alloc.get_global(
+            _get_global_key('target', instr.address, ctx.aliases))
     store_temp(target, branch.target.get(), ctx.il, instr.loc)
 
 def _lift_cycle(ctx: LiftingContext, store_branches: bool = False):
@@ -717,11 +725,11 @@ def _lift_cycle(ctx: LiftingContext, store_branches: bool = False):
     first_branch = True
     for branch in ctx.branch_queue.dequeue():
         if store_branches:
+            ctx.conditional_handler.before_lifting(branch)
             _store_branch(branch, ctx)
         else:
             if branch.type != ILBranchType.Call:
                 # HACK: ugly, but remaining IL needs to be added before non-call
-                ctx.conditional_handler.end_conditional()
                 _drain_queues(ctx, True)
             ctx.conditional_handler.before_lifting(branch, not first_branch)
             branch.lift()
@@ -786,7 +794,8 @@ def _queue_pending_branches(pending_branches: list[BranchContext], ctx: LiftingC
         if branch_context.type == ILBranchType.UNDETERMINED: continue
         instr = LiftPartial(branch_context.src, ctx, branch_context.condition)
         def cb() -> ExpressionIndex:
-            target = ctx.temp_alloc.get_global(f'target@{instr.address:08x}')
+            target = ctx.temp_alloc.get_global(
+                    _get_global_key('target', instr.address, ctx.aliases))
             return ctx.il.reg(ARCH_SIZE, target, instr.loc)
         branch = LiftBranch(instr, Wrapper(cb), branch_context.type, ctx, branch_context.delay)
         ctx.branch_queue.enqueue([(branch.delay, branch)])
@@ -808,6 +817,7 @@ def lift_function(arch: TMS320C6xBaseArch, function: LowLevelILFunction, context
     settings = LiftingSettings(header_based=True, simplify=False)
     ctx = LiftingContext(arch, function, settings)
     function_context: FunctionContext = context.function_arch_context
+    ctx.aliases = function_context.aliases
 
     logger = context._logger
     bv = unwrap(function.view)

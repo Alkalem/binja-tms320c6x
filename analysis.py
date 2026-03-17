@@ -62,6 +62,7 @@ class FunctionContext:
         self.headers: dict[int, bytes] = dict()
         self.sploop_ii: dict[int, int] = dict()
         self.branches: dict[int, list[BranchContext]] = dict()
+        self.aliases: dict[int, int] = dict()
 
 def analyze_basic_blocks(arch, func: Function, 
         context: BasicBlockAnalysisContext) -> None:
@@ -155,7 +156,7 @@ def analyze_basic_blocks(arch, func: Function,
 
                     #TODO: check for pending branches at split point
                     __add_branches_to_context(function_context, location.addr, pending_branches)
-                    __transfer_specified_branches(function_context, specified_branches.get(target_block.start, None), location.addr)
+                    __transfer_specified_branches(function_context, specified_branches.get(target_block.start, []), location.addr)
 
                     seen_blocks.add(location)
                     context.add_basic_block(split_block)
@@ -296,7 +297,13 @@ def analyze_basic_blocks(arch, func: Function,
                 if target not in block_carried_branches:
                     block_carried_branches[target] = carried_branches
                 else:
-                    assert block_carried_branches[target] == carried_branches
+                    for carried_a, carried_b in zip(block_carried_branches[target],carried_branches):
+                        for branch_a, branch_b in zip(carried_a, carried_b):
+                            condition_a, branch_a, src_a = branch_a
+                            condition_b, branch_b, src_b = branch_b
+                            # Sources should differ at least in their address
+                            assert condition_a == condition_b and branch_a == branch_b
+                            function_context.aliases[src_b.address] = src_a.address
 
 
             # Determine delay of execution packet and consume delay slots
@@ -400,6 +407,7 @@ def __transfer_specified_branches(context: FunctionContext, specified_branches: 
             if target_a == target_b:
                 branch_context.type = specified_branch.type
                 specified_branches.remove(specified_branch)
+                context.aliases[branch_context.src.address] = specified_branch.src.address
                 break
 
 def __addr_is_executable(view:BinaryView, addr:int) -> bool:
