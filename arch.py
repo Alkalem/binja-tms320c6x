@@ -15,7 +15,6 @@
 # this program. If not, see <http://www.gnu.org/licenses/>.
 
 from binaryninja.architecture import Architecture, RegisterInfo, RegisterName, BasicBlockAnalysisContext, FunctionLifterContext, InstructionTextToken
-from binaryninja.callingconvention import CallingConvention
 from binaryninja.enums import ImplicitRegisterExtend
 from binaryninja.function import Function
 from binaryninja.log import log_warn, log_error
@@ -155,26 +154,6 @@ class TMS320C67x(TMS320C6xBaseArch):
             # stop at fetch packet boundary
             if ((instruction.address+ARCH_SIZE) % (8*ARCH_SIZE) == 0): break
         return tokens, ARCH_SIZE * (i+1)
-
-class C67Call(CallingConvention):
-    name = 'c67call'
-
-    caller_saved_regs = [
-        'A0', 'B0', 'A1', 'B1', 'A2', 'B2', 'A3', 
-        'A4', 'B4', 'A5', 'B5', 'A6', 'B6', 'A7', 'B7',
-        'A8', 'B8', 'A9', 'B9', 'A10', 'B10', 'A11', 'B11',
-        'A12', 'B12', 'A13', 'B13', 'A14', 'B14'
-    ]
-    callee_saved_regs = [
-        'B3', 'A15', 'B15'
-    ]
-    int_arg_regs = [
-        'A4', 'B4', 'A6', 'B6', 'A8', 'B8'
-    ]
-
-    eligible_for_heuristics = True
-    int_return_reg = 'A4'
-    high_int_return_reg = 'A5'
 
 class TMS320C6x(TMS320C6xBaseArch):
     name = 'TMS320C6x'

@@ -16,8 +16,8 @@
 
 import binaryninja as _bn
 
-from .arch import TMS320C67x, C67Call, TMS320C6x
-
+from .arch import TMS320C67x, TMS320C6x
+from .platform import C67Call, LinuxC6xPlatform, C6xCall
 
 TMS320C67x.register()
 _arch = _bn.architecture.Architecture['TMS320C67x+']
@@ -30,6 +30,17 @@ _bn.binaryview.BinaryViewType['ELF'].register_arch(
 
 TMS320C6x.register()
 _arch = _bn.architecture.Architecture['TMS320C6x']
+_cc = C6xCall(arch=_arch, name='C6xCall')
+_arch.register_calling_convention(_cc)
+_arch.default_calling_convention = _cc
 _bn.binaryview.BinaryViewType['ELF'].register_arch(
     140, _bn.enums.Endianness.LittleEndian, _arch
 )
+
+_linuxplatform = LinuxC6xPlatform(_arch)
+_linuxplatform.register("linux")
+_linuxplatform.default_calling_convention = _cc
+
+# Linux uses ELF platforms 0 and 3, so register for both
+_bn.BinaryViewType['ELF'].register_platform(0, _arch, _linuxplatform)
+_bn.BinaryViewType['ELF'].register_platform(3, _arch, _linuxplatform)
