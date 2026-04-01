@@ -52,7 +52,7 @@ This approach converts instructions to low-level IL in a way that closely resemb
 
 The delay for register reads and write back of results is documented for each instruction type. For some instructions, there are multiple cycles of delay between the last read cycle and the first write cycle. This degree of freedom for lifting the instruction semantic is resolved by lifting instructions as early as possible. That means, as soon as all operands are available. This reduces the number of temp registers used for each cycle and likely reduces conflicts.
 
-Temp register cycles for MPYDP: earliest lifting: 3+2+1+5+6 = 17, latest lifting: 9+8+7+6 = 30
+<!-- Temp register cycles for MPYDP: earliest lifting: 3+2+1+5+6 = 17, latest lifting: 9+8+7+6 = 30 -->
 
 ## Challenges
 
@@ -62,6 +62,6 @@ To correctly analyze branches of the C6000 architectures, the branches of one EP
 The above approaches improve the results of the default block analysis. However, they require workarounds and additional analysis while generating instruction info. Also, some control flow patterns cannot be handled by the default algorithm. For example, SPLOOPs and pending branches do not work. 
 
 Disassembly for variants that support header-based FPs requires knowledge of the whole FP up to the last word. Also, SPLOOPs contain an iteration interval that is necessary to disassemble SPKERNEL(R) correctly. In both cases, basic blocks can start after or end before the required words.
-As long as Binja does not provide a way to pass additional information or read the binary from `get_instruction_text`, these cases seem impossible to implement correctly.
+These cases seem impossible to implement correctly with `get_instruction_text`. To address this issue, block analysis may produce context information that can be used later for disassembly and lifting. Complete disassembly can be achieved with `get_instruction_text_with_context`.
 
-Compilers for the C6000 often try to use the cycles until delayed instructions complete. This also leads to patterns, where instructions are pending on the end of a basic block. This cannot be lifted correctly with instruction-level lifting as it cannot cross block boundaries. Binja will support function-level lifting to solve this issue.
+Compilers for the C6000 often try to use the cycles until delayed instructions complete. This also leads to patterns, where instructions are pending on the end of a basic block. This cannot be lifted correctly with instruction-level lifting as it cannot cross block boundaries. Binja's support for function-level lifting can be used to solve this issue.

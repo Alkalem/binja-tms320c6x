@@ -4,12 +4,14 @@ This is less a documentation how lifting works than a collection of notes and id
 
 Tasks:
 - Lifting algorithm that fulfills the following criteria:
-    - [ ] Lifting of register reads/writes in correct order.
-    - [ ] Lifting of loads/stores in correct order.
-    - [ ] Handling operants independent of opcode.
+    - [x] Lifting of register reads/writes in correct order.
+    - [x] Lifting of loads/stores in correct order.
+    - [x] Handling operands independent of opcode.
     - [ ] Simple way to implement additional opcodes.
     - [ ] Support for varying input and output sizes.
-- [ ] Lifting of conditions
+- [x] Lifting of conditions
+- [ ] Lifting of SPLOOPs and delayed instructions in short loops.
+- [ ] Conflict detection for results delayed across basic blocks.
 
 There are multiple goals to optimize a lifting algorithm for:
 - Minimize number of used temporary registers.

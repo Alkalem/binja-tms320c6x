@@ -27,6 +27,4 @@ Lifting:
 
 Assembly:
 - Simple assembly bit flipping (completely changing to arbitrary instructions will require working assembler)
-- Inverting of conditional branches (i.e. the condition)
-- Always branch (conditional branch -> unconditional)
-- NOPing of instructions
+- Changing registers (sometimes requires different format)
