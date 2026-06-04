@@ -19,6 +19,7 @@ import binaryninja as _bn
 from .arch import TMS320C67x, TMS320C6x
 from .platform import C67Call, LinuxC6xPlatform, C6xCall
 
+
 TMS320C67x.register()
 _arch = _bn.architecture.Architecture['TMS320C67x+']
 _cc = C67Call(arch=_arch, name='C67call')

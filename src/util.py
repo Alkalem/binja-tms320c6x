@@ -16,7 +16,7 @@
 
 from typing import Optional, Callable
 
-from .disassembler.types import Instruction, ImmediateOperand
+from tms320c6x_disassembler.types import Instruction, ImmediateOperand
 
 def get_delay_consumption(instr:Instruction):
     delay_slots = 1

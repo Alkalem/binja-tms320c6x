@@ -1,6 +1,6 @@
 # Binary Ninja TMS320C6x Plugin
 
-This plugin adds support for the TMS320C6000 DSP architecture family to binja. Support currently extends up to ISA C674.
+This plugin adds support for the TMS320C6x DSP architecture family to binja. Support currently extends up to ISA C674.
 Disassembly is complete, for other features see the detailed limitations below. Block analysis is implemented for delayed branches and non-reloading SPLOOPs, lifting currently translates a small set of instructions.
 
 ## Installation

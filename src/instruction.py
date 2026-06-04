@@ -22,8 +22,8 @@ from typing import Any, Generator, Optional
 from dataclasses import dataclass
 
 from .constants import ARCH_SIZE, LOAD_BASE, BRANCH_DELAY
-from .disassembler import Disassembler as C6xDisassembler
-from .disassembler.types import Operand, Instruction, Register, \
+from tms320c6x_disassembler import Disassembler as C6xDisassembler
+from tms320c6x_disassembler.types import Operand, Instruction, Register, \
         ImmediateOperand, RegisterOperand, ControlRegisterOperand, \
         RegisterPairOperand, MemoryOperand, FuncUnitsOperand, ISA
 

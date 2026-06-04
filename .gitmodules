@@ -1,3 +1,0 @@
-[submodule "disassembler"]
-	path = disassembler
-	url = git@github.com:Alkalem/TMS320C6X_Disassembler

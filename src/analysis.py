@@ -26,7 +26,7 @@ from binaryninja.log import log_info, log_debug
 from dataclasses import dataclass
 from typing import Dict, Optional, Set
 
-from .disassembler.types import ConditionType, Instruction, OperandType, RegisterOperand, Register, ControlRegisterOperand, ControlRegister, RW
+from tms320c6x_disassembler.types import ConditionType, Instruction, OperandType, RegisterOperand, Register, ControlRegisterOperand, ControlRegister, RW
 from .constants import ARCH_SIZE, FP_SIZE, HW_SIZE, BRANCH_DELAY
 from .lifting import ILBranchType
 from .util import get_delay_consumption, unwrap

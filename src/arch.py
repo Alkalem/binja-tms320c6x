@@ -22,7 +22,7 @@ from binaryninja.lowlevelil import LowLevelILFunction
 
 from typing import Any, Optional
 
-from .disassembler.types import Register, ControlRegister, ISA
+from tms320c6x_disassembler.types import Register, ControlRegister, ISA
 from .analysis import analyze_basic_blocks
 from .instruction import Disassembler, gen_tokens, gen_parallel_fallthrough
 from .constants import *

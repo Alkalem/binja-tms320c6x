@@ -1,20 +1,21 @@
 {
 	"pluginmetadataversion" : 2,
-	"name": "TMS320C6000",
+	"name": "TMS320C6x",
 	"type": ["architecture"],
 	"api": ["python3"],
-	"description": "A disassembler for CPUs from the TI DSP family TMS320C6000.",
+	"description": "A disassembler for CPUs from the TI DSP family TMS320C6x.",
 	"license": {
 		"name": "GPL-3.0",
 		"text": "Copyright 2025-2026 Benedikt Waibel\n\nThis file is part of the binary ninja tms320c6x architecture plugin.\n\nThis plugin is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.\n\nThis program is distributed in the hope that it will be useful,but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.\n\nYou should have received a copy of the GNU General Public License along with this program. If not, see <http://www.gnu.org/licenses/>."
 	},
 	"platforms" : ["Darwin", "Linux", "Windows"],
 	"installinstructions" : {
-		"Darwin" : "",
-		"Linux" : "",
-		"Windows" : ""
+		"Darwin" : "pip install -r requirements.txt",
+		"Linux" : "pip install -r requirements.txt",
+		"Windows" : "pip install -r requirements.txt"
 	},
-	"version": "0.2",
+	"dependencies": {"pip": ["tms320c6x_disassembler"]},
+	"version": "0.3",
 	"author": "Benedikt Waibel",
 	"minimumbinaryninjaversion": 7486
 }
