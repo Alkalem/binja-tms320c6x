@@ -119,8 +119,8 @@ class TMS320C6xBaseArch(Architecture):
         # NOTE: BDEC and BPOS are not inverted
         return data[:-1] + bytes([data[-1] ^ 0x10])
 
-class TMS320C67x(TMS320C6xBaseArch):
-    name = 'TMS320C67x+'
+class TInyC6x(TMS320C6xBaseArch):
+    name = 'TInyC6x'
 
     regs = dict()
     system_regs = list()

@@ -17,8 +17,8 @@
 from binaryninja.callingconvention import CallingConvention
 from binaryninja.platform import Platform
 
-class C67Call(CallingConvention):
-    name = 'c67call'
+class TInyC6xCall(CallingConvention):
+    name = 'tiny-c6xcall'
 
     caller_saved_regs = [
         'A0', 'B0', 'A1', 'B1', 'A2', 'B2', 'A3', 
