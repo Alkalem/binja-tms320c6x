@@ -147,7 +147,7 @@ class TInyC6x(TMS320C6xBaseArch):
         parallel = False
         for i, instruction in enumerate(instructions):
             assert instruction.size == ARCH_SIZE
-            tokens.extend(gen_tokens(instruction, i*ARCH_SIZE, parallel))
+            tokens.extend(gen_tokens(instruction, parallel, i*ARCH_SIZE))
             # separate execution packets
             parallel = instruction.parallel
             if not parallel: break
@@ -191,8 +191,9 @@ class TMS320C6x(TMS320C6xBaseArch):
         offset = 0
         parallel = False
         for instruction in instructions:
-            tokens.extend(gen_tokens(instruction, offset, 
-                    parallel and not instruction.is_fp_header()))
+            tokens.extend(gen_tokens(instruction, 
+                    parallel and not instruction.is_fp_header(),
+                    offset))
             offset += instruction.size
             # separate execution packets
             if not instruction.is_fp_header():

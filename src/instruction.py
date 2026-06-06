@@ -16,43 +16,48 @@
 
 from binaryninja.architecture import InstructionTextToken, InstructionInfo
 from binaryninja.enums import InstructionTextTokenType, BranchType
-from binaryninja.log import log_warn
 
-from typing import Any, Generator, Optional
+from typing import Generator, Optional
 from dataclasses import dataclass
 
-from .constants import ARCH_SIZE, LOAD_BASE, BRANCH_DELAY
+from .constants import ARCH_SIZE, BRANCH_DELAY
 from tms320c6x_disassembler import Disassembler as C6xDisassembler
 from tms320c6x_disassembler.types import Operand, Instruction, Register, \
         ImmediateOperand, RegisterOperand, ControlRegisterOperand, \
         RegisterPairOperand, MemoryOperand, FuncUnitsOperand, ISA
 
-@dataclass
+@dataclass(frozen=True)
 class _BranchInfo:
-    delay:int
-    type:BranchType
-    target:int
-    conditional:bool
+    delay: int
+    type: BranchType
+    target: int
+    conditional: bool
 
 _compact_header = bytes.fromhex('0000e0ef')
 
 class Disassembler:
-    def __init__(self, isa:ISA=ISA.C67X):
+    def __init__(self, isa: ISA = ISA.C67X):
         self.__dis = C6xDisassembler(isa=isa)
     
-    def disasm(self, data, addr, limit=-1, end:int=0, **options) -> Generator[Instruction]:
-        return self.__dis.disasm(data, addr, count=limit, **options)
+    def disasm(self, data: bytes, addr: int, limit: int = -1, 
+                end: int = 0, **options) -> Generator[Instruction]:
+        '''Disassemble to a stream of instructions at an address.
+        '''
+        return self.__dis.disasm(data, addr, count=limit, end=end, **options)
 
-    def decode(self, data, addr) -> Instruction:
+    def decode(self, data: bytes, addr: int) -> Instruction:
+        '''Disassemble a single instruction.
+        Returns an invalid instruction if decoding fails.
+        '''
         try:
             instr = next(self.__dis.disasm(
                     data, addr, count=1))
         except StopIteration:
-            # assert False, f'Disassembler should return result (for {len(data)} @{addr:08x})'
             return Instruction.invalid(addr, 4, False, None)
         return instr
     
-    def decode_single(self, data, addr, header=None, **options) -> Instruction:
+    def decode_single(self, data: bytes, addr: int, 
+                header : Optional[bytes] = None, **options) -> Instruction:
         '''Disassemble a single instruction.
         
         The length of the instruction to decode should be known.
@@ -66,7 +71,7 @@ class Disassembler:
         except StopIteration:
             raise ValueError('provided args cannot be decoded')
 
-    def _try_disasm_single(self, data, addr) -> Instruction:
+    def _try_disasm_single(self, data: bytes, addr: int) -> Instruction:
         '''Disassemble a single instruction on a best effort basis.
         
         Results may be inaccurate, especially for invalid instructions.
@@ -85,7 +90,9 @@ class Disassembler:
         except StopIteration: pass
         return instr
 
-    def info(self, data, addr):
+    def info(self, data: bytes, addr: int):
+        '''Disassemble the next instruction and return its InstructionInfo.
+        '''
         instr = self._try_disasm_single(data, addr)
         result = InstructionInfo()
         result.length = instr.size
@@ -132,14 +139,9 @@ def _gen_operand_tokens(operand: Operand):
                 integer = hex(value)
             else:
                 integer = str(value)
-            if value >= LOAD_BASE:
-                return [InstructionTextToken(
-                        InstructionTextTokenType.PossibleAddressToken,
-                        integer, value=value)]
-            else:
-                return [InstructionTextToken(
-                        InstructionTextTokenType.IntegerToken,
-                        integer, value=value)]
+            return [InstructionTextToken(
+                    InstructionTextTokenType.IntegerToken,
+                    integer, value=value)]
         case RegisterOperand(register)|ControlRegisterOperand(register):
             return [InstructionTextToken(
                     InstructionTextTokenType.RegisterToken,
@@ -226,7 +228,12 @@ def _gen_operand_tokens(operand: Operand):
 CONDITION_LENGTH = 6
 OPCODE_INDENTATION = 12
 
-def gen_tokens(instr: Instruction, offset: int, parallel:bool):
+def gen_tokens(instr: Instruction, parallel: bool, offset: int = 0):
+    '''Convert an instruction into instruction tokens.
+
+    Note, that the `parallel` flag is from the previous instruction.
+    The `offset` is a byte offset when translating multiple lines at once.
+    '''
     tokens = list()
     if parallel:
         tokens.append(
