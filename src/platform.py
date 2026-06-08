@@ -26,6 +26,7 @@ class TInyC6xCall(CallingConvention):
         'A8', 'B8', 'A9', 'B9', 'A10', 'B10', 'A11', 'B11',
         'A12', 'B12', 'A13', 'B13', 'A14', 'B14'
     ]
+    # B3: return address, A15: frame pointer, B15: stack pointer
     callee_saved_regs = [
         'B3', 'A15', 'B15'
     ]
@@ -38,7 +39,7 @@ class TInyC6xCall(CallingConvention):
     high_int_return_reg = 'A5'
 
 class LinuxC6xPlatform(Platform):
-    name = "linux-c6x"
+    name = "linux-c6x" # type: ignore
 
 class C6xCall(CallingConvention):
     name = "c6xcall"
@@ -52,6 +53,7 @@ class C6xCall(CallingConvention):
         'A24', 'B24', 'A25', 'B25', 'A26', 'B26', 'A27', 'B27',
         'A28', 'B28', 'A29', 'B29', 'A30', 'B30', 'A31', 'B31', 
     ]
+    # B3: return address, A15: frame pointer, B15: stack pointer
     callee_saved_regs = [
         'B3', 'A15', 'B15'
     ]

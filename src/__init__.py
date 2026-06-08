@@ -20,28 +20,40 @@ from .arch import TInyC6x, TMS320C6x
 from .platform import TInyC6xCall, LinuxC6xPlatform, C6xCall
 
 
-TInyC6x.register()
-_arch = _bn.architecture.Architecture['TInyC6x']
-_cc = TInyC6xCall(arch=_arch, name='TInyC6xcall')
-_arch.register_calling_convention(_cc)
-_arch.default_calling_convention = _cc
-_bn.binaryview.BinaryViewType['ELF'].register_arch(
-    0x9c60, _bn.enums.Endianness.LittleEndian, _arch
-)
+def _init_plugin():
+    TINY_C_MACHINE = 0x9c60
+    TI_C6x_MACHINE = 140
+    SYSV_OSABI = 0
+    LINUX_OSABI = 3
 
-TMS320C6x.register()
-_arch = _bn.architecture.Architecture['TMS320C6x']
-_cc = C6xCall(arch=_arch, name='C6xCall')
-_arch.register_calling_convention(_cc)
-_arch.default_calling_convention = _cc
-_bn.binaryview.BinaryViewType['ELF'].register_arch(
-    140, _bn.enums.Endianness.LittleEndian, _arch
-)
+    TInyC6x.register()
+    arch = _bn.architecture.Architecture['TInyC6x']
+    cc = TInyC6xCall(arch=arch, name='TInyC6xcall')
+    arch.register_calling_convention(cc)
+    arch.default_calling_convention = cc
+    _bn.binaryview.BinaryViewType['ELF'].register_arch(
+        TINY_C_MACHINE, _bn.enums.Endianness.LittleEndian, arch
+    )
 
-_linuxplatform = LinuxC6xPlatform(_arch)
-_linuxplatform.register("linux")
-_linuxplatform.default_calling_convention = _cc
+    TMS320C6x.register()
+    arch = _bn.architecture.Architecture['TMS320C6x']
+    cc = C6xCall(arch=arch, name='C6xCall')
+    arch.register_calling_convention(cc)
+    arch.default_calling_convention = cc
+    _bn.binaryview.BinaryViewType['ELF'].register_arch(
+        TI_C6x_MACHINE, _bn.enums.Endianness.LittleEndian, arch
+    )
 
-# Linux uses ELF platforms 0 and 3, so register for both
-_bn.BinaryViewType['ELF'].register_platform(0, _arch, _linuxplatform)
-_bn.BinaryViewType['ELF'].register_platform(3, _arch, _linuxplatform)
+    platform = LinuxC6xPlatform(arch)
+    platform.register("linux")
+    platform.default_calling_convention = cc
+
+    # Linux uses ELF platforms 0 and 3, so register for both
+    _bn.BinaryViewType['ELF'].register_platform(SYSV_OSABI, arch, platform)
+    _bn.BinaryViewType['ELF'].register_platform(LINUX_OSABI, arch, platform)
+    return platform
+
+# Platform currently needs to be stored in the module.
+# TODO: Should be removed when platform registration prevents freeing it.
+__platform = _init_plugin()
+
