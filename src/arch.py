@@ -14,8 +14,7 @@
 # You should have received a copy of the GNU General Public License along with
 # this program. If not, see <http://www.gnu.org/licenses/>.
 
-from binaryninja.architecture import Architecture, RegisterInfo, RegisterName, BasicBlockAnalysisContext, FunctionLifterContext, InstructionTextToken
-from binaryninja.enums import ImplicitRegisterExtend
+from binaryninja.architecture import Architecture, InstructionInfo, RegisterInfo, RegisterName, BasicBlockAnalysisContext, FunctionLifterContext, InstructionTextToken
 from binaryninja.function import Function
 from binaryninja.log import log_warn, log_error
 from binaryninja.lowlevelil import LowLevelILFunction
@@ -39,17 +38,20 @@ class TMS320C6xBaseArch(Architecture):
     # (see binaryninja-api issue 6868)
     max_instr_length = ARCH_SIZE * (8*(5+1))
 
-    disasm:Disassembler
+    stack_pointer = 'B15'
+    link_reg = 'B3'
 
-    def get_instruction_info(self, data, addr):
+    disasm: Disassembler
+
+    def get_instruction_info(self, data: bytes, addr: int) -> InstructionInfo:
         return self.disasm.info(data, addr)
     
-    def get_instruction_low_level_il(self, data, addr, il):
+    def get_instruction_low_level_il(self, data: bytes, addr: int, il: LowLevelILFunction) -> int:
         stream = self.disasm.disasm(data, addr)
         return lift_instructions(self, il, stream)
 
     def analyze_basic_blocks(self, func: Function, 
-            context: BasicBlockAnalysisContext) -> None:
+            context: BasicBlockAnalysisContext):
         analyze_basic_blocks(self, func, context)
 
     @Architecture.can_assemble.getter
@@ -119,6 +121,7 @@ class TMS320C6xBaseArch(Architecture):
         # NOTE: BDEC and BPOS are not inverted
         return data[:-1] + bytes([data[-1] ^ 0x10])
 
+# git://repo.or.cz/tinycc.git
 class TInyC6x(TMS320C6xBaseArch):
     name = 'TInyC6x'
 
@@ -131,17 +134,14 @@ class TInyC6x(TMS320C6xBaseArch):
         _nameH = RegisterName(reg.name+'H')
         regs[_nameH] = RegisterInfo(_name, ARCH_SIZE//2, ARCH_SIZE//2)
     for reg in ControlRegister:
-        if reg.isa not in ISA.C67XP: continue
+        if reg.isa not in ISA.C67X: continue
         _name = RegisterName(reg.name)
         regs[_name] = RegisterInfo(_name, ARCH_SIZE)
         system_regs.append(_name)
-
-    stack_pointer = 'B15'
-    link_reg = 'B3'
     
-    disasm = Disassembler(isa=ISA.C67XP) 
+    disasm = Disassembler(isa=ISA.C67X) 
 
-    def get_instruction_text(self, data, addr):
+    def get_instruction_text(self, data: bytes, addr: int) -> Optional[tuple[list[InstructionTextToken], int]]:
         instructions = self.disasm.disasm(data, addr, limit=8)
         tokens = []
         parallel = False
@@ -170,9 +170,6 @@ class TMS320C6x(TMS320C6xBaseArch):
         _name = RegisterName(reg.name)
         regs[_name] = RegisterInfo(_name, ARCH_SIZE)
         system_regs.append(_name)
-
-    stack_pointer = 'B15'
-    link_reg = 'B3'
 
     disasm = Disassembler(isa=ISA.C674X)
 
