@@ -38,8 +38,8 @@ class TInyC6xCall(CallingConvention):
     int_return_reg = 'A4'
     high_int_return_reg = 'A5'
 
-class LinuxC6xPlatform(Platform):
-    name = "linux-c6x" # type: ignore
+class C6xPlatform(Platform):
+    name = "tms320c6x" # type: ignore
 
 class C6xCall(CallingConvention):
     name = "c6xcall"

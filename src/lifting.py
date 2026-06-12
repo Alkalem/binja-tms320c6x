@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from binaryninja.architecture import RegisterName
+from binaryninja.architecture import FunctionLifterContext, RegisterName
 from binaryninja.basicblock import BasicBlock
 from binaryninja.commonil import ILSourceLocation
 from binaryninja.function import ArchAndAddr
@@ -33,7 +33,6 @@ from typing import Any, Optional, Sequence, Iterable, Generator, List, TYPE_CHEC
 if TYPE_CHECKING:
     from .arch import TMS320C6xBaseArch
     from .analysis import FunctionContext, BranchContext
-from .arch import FunctionLifterContext
 from .constants import ARCH_SIZE, HW_SIZE, DW_SIZE, INSTRUCTION_DELAY, FP_SIZE
 from .instruction import Disassembler
 from .util import get_delay_consumption, is_branch, unwrap, Wrapper

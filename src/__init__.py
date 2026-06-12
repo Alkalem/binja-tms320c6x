@@ -17,7 +17,7 @@
 import binaryninja as _bn
 
 from .arch import TInyC6x, TMS320C6x
-from .platform import TInyC6xCall, LinuxC6xPlatform, C6xCall
+from .platform import TInyC6xCall, C6xPlatform, C6xCall
 
 
 def _init_plugin():
@@ -44,7 +44,7 @@ def _init_plugin():
         TI_C6x_MACHINE, _bn.enums.Endianness.LittleEndian, arch
     )
 
-    platform = LinuxC6xPlatform(arch)
+    platform = C6xPlatform(arch)
     platform.register("linux")
     platform.default_calling_convention = cc
 
