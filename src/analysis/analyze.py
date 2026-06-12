@@ -19,28 +19,27 @@ from binaryninja.basicblock import BasicBlock
 from binaryninja.binaryview import BinaryView
 from binaryninja.enums import BranchType, FunctionAnalysisSkipOverride
 from binaryninja.function import ArchAndAddr, Function
-from binaryninja.lowlevelil import LowLevelILFunction
 from binaryninja.log import log_info, log_debug
 
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Set
+from typing import Optional, Sequence
 
-from tms320c6x_disassembler.types import ConditionType, Instruction, OperandType, RegisterOperand, Register, ControlRegisterOperand, ControlRegister, RW
-from .constants import ARCH_SIZE, FP_SIZE, HW_SIZE, BRANCH_DELAY
-from .lifting import ILBranchType
-from .util import get_delay_consumption, unwrap
+from tms320c6x_disassembler.types import ConditionType, Instruction, RegisterOperand, Register, ControlRegisterOperand, ControlRegister, RW
+from ..constants import ARCH_SIZE, FP_SIZE, HW_SIZE, BRANCH_DELAY
+from ..lifting import ILBranchType
+from ..util import get_delay_consumption, unwrap
 
 
 @dataclass
 class SploopContext:
-    active:bool = False
-    sploop:Optional[Instruction] = None
-    start:int = 0
-    end:int = 0
+    active: bool = False
+    sploop: Optional[Instruction] = None
+    start: int = 0
+    end: int = 0
 
 
-    def process(self, i:Instruction):
+    def process(self, i: Instruction):
         if i.opcode.startswith('sploop'):
             assert not self.active
             self.active = True
@@ -64,14 +63,18 @@ class FunctionContext:
         self.branches: dict[int, list[BranchContext]] = dict()
         self.aliases: dict[int, int] = dict()
 
+BranchSlot = Sequence[tuple[ConditionType, InstructionBranch, Instruction]]
+UnifiedSlot = Sequence[tuple[ConditionType, InstructionBranch, Instruction | None]]
+PendingBranches = list[BranchSlot]
+
 def analyze_basic_blocks(arch, func: Function, 
         context: BasicBlockAnalysisContext) -> None:
     #TODO: sound error handling
     view = func.view
-    blocks_to_process:list[ArchAndAddr] = list()
-    instr_blocks:Dict[ArchAndAddr, BasicBlock] = dict()
-    seen_blocks:Set[ArchAndAddr] = set()
-    block_carried_branches = dict()
+    blocks_to_process: list[ArchAndAddr] = list()
+    instr_blocks: dict[ArchAndAddr, BasicBlock] = dict()
+    seen_blocks: set[ArchAndAddr] = set()
+    block_carried_branches: dict[ArchAndAddr, PendingBranches] = dict()
     sploop_blocks: dict[ArchAndAddr, SploopContext] = dict()
 
     # Start by processing the entry point of the function
@@ -102,14 +105,14 @@ def analyze_basic_blocks(arch, func: Function,
         # seen_blocks.add(ArchAndAddr(arch, location.addr))
 
         # Create a new basic block
-        block:BasicBlock = context.create_basic_block(location.arch, location.addr) # type: ignore
+        block: BasicBlock = context.create_basic_block(location.arch, location.addr) # type: ignore
         assert block is not None
 
         # This architecture interpretes a delay slot as a cycle.
         # Due to parallelism and idling instructions,
         # the number of instructions per delay cycle may vary.
         # For basic block analysis, delay is only relevant for branch instructions.
-        pending_branches = list()
+        pending_branches: PendingBranches = list()
         if location in block_carried_branches:
             pending_branches = block_carried_branches[location]
             __add_branches_to_context(function_context, location.addr, pending_branches)
@@ -208,7 +211,7 @@ def analyze_basic_blocks(arch, func: Function,
                     pending_branches[delay].append((instr.condition, branch, instr))
 
             #TODO: handle function branches and branches with pending delay
-            def handle_branch(branch: InstructionBranch, returns: bool, src: Optional[Instruction], carried_branches):
+            def handle_branch(branch: InstructionBranch, returns: bool, src: Optional[Instruction], carried_branches: PendingBranches):
                 log_debug(f'Handling {branch.type.name} @{location.addr:08x} to {branch.target:08x} (return? {returns})')
                 nonlocal ends_block
                 target_type = branch.type
@@ -281,15 +284,15 @@ def analyze_basic_blocks(arch, func: Function,
                         sploop_context.active = False
                         sploop_context.start = 0
             
-            def is_likely_call(branch:InstructionBranch, carried_branches,
-                    returns:bool) -> bool:
+            def is_likely_call(branch: InstructionBranch, carried_branches: PendingBranches,
+                    returns: bool) -> bool:
                 # This address is not helpful if symbols for basic blocks exist
                 # next_func_addr = view.get_next_function_start_after(location.addr)
                 is_in_function = func.lowest_address <= branch.target
                 return (len(carried_branches) == 0 and 
                     (not is_in_function or returns))
 
-            def add_target_to_process(addr:int, carried_branches):
+            def add_target_to_process(addr: int, carried_branches: PendingBranches):
                 target = ArchAndAddr(arch, addr)
                 if target not in seen_blocks:
                     blocks_to_process.append(target)
@@ -357,7 +360,7 @@ def __update_context(context: FunctionContext, end_addr: int, view: BinaryView):
             fp_addr = end_addr - (end_addr % FP_SIZE)
             context.headers[fp_addr] = fp_header
 
-def __add_branches_to_context(context: FunctionContext, addr: int, branches: list[list[tuple[ConditionType, InstructionBranch, Instruction]]]):
+def __add_branches_to_context(context: FunctionContext, addr: int, branches: PendingBranches):
     branch_contexts = list()
     for delay, slot in enumerate(branches):
         for condition, branch, src in slot:
@@ -410,10 +413,10 @@ def __transfer_specified_branches(context: FunctionContext, specified_branches: 
                 context.aliases[branch_context.src.address] = specified_branch.src.address
                 break
 
-def __addr_is_executable(view:BinaryView, addr:int) -> bool:
+def __addr_is_executable(view: BinaryView, addr: int) -> bool:
     return view.is_offset_executable(addr)
 
-def __resolve_branch(branch:InstructionBranch, instr:Instruction) -> InstructionBranch:
+def __resolve_branch(branch: InstructionBranch, instr: Instruction) -> InstructionBranch:
     match branch.type:
         case BranchType.IndirectBranch:
             # indirect target using register
@@ -425,7 +428,7 @@ def __resolve_branch(branch:InstructionBranch, instr:Instruction) -> Instruction
                 branch = InstructionBranch(BranchType.FunctionReturn, branch.target, branch.arch)
     return branch
 
-def __unify_branches(branches):
+def __unify_branches(branches: BranchSlot) -> UnifiedSlot:
     if len(branches) == 0: return branches
     unified_branches = list()
     require_false_branch = True
@@ -458,7 +461,7 @@ def __unify_branches(branches):
         unified_branches.append((condition, false_branch, None))
     return unified_branches
 
-def __get_carried_branches(active_condition:ConditionType, pending_branches):
+def __get_carried_branches(active_condition: ConditionType, pending_branches: PendingBranches) -> PendingBranches:
     carried_branches = list()
     for branch_slot in pending_branches:
         carried_branch_slot = list()
