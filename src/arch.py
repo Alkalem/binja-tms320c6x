@@ -198,7 +198,7 @@ class TMS320C6x(TMS320C6xBaseArch):
                 if not parallel: break
         if parallel:
             # stopped in the middle of EP, visualize as parallel fallthrough
-            tokens.extend(gen_parallel_fallthrough(offset))
+            tokens.extend(gen_parallel_fallthrough(offset - instruction.size))
         return tokens, offset
     
     def get_instruction_text(self, data: bytes, addr: int) -> Optional[tuple[list[InstructionTextToken], int]]:

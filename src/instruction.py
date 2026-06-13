@@ -310,9 +310,9 @@ def gen_newline(offset:int) -> InstructionTextToken:
 def gen_parallel_fallthrough(offset: int) -> list[InstructionTextToken]:
     return [
         InstructionTextToken(
-                InstructionTextTokenType.TextToken, '|| ' + ' ' * OPCODE_INDENTATION),
+                InstructionTextTokenType.TextToken, '|| ' + ' ' * CONDITION_LENGTH),
         InstructionTextToken(
-                InstructionTextTokenType.CommentToken, '<parallel fallthrough>'),
+                InstructionTextTokenType.CharacterConstantToken, '<parallel fallthrough>'),
         InstructionTextToken(
                 InstructionTextTokenType.NewLineToken, '', 
                 offset)
