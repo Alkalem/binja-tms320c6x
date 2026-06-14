@@ -27,3 +27,9 @@ This document collects problematic patterns and sequences of instructions a comp
 * Occurrence: frequent, used by TI compiler by default
 * Problem: Treating each instruction separate, decompilation results may be too general. Conditional use as described may constrain following instructions. For example, (delayed) instructions after a conditional branch should treat that condition as true.
 * Solution: limited constant propagation for conditionals during analysis and lifting, should overrule unconstrained conditionals
+
+### Shifting conditions
+* Pattern: Conditional instructions are combined with instructions that overwrite the condition registers or move their values between registers. For example `[A0] b <label1>; || mv A0, B0; [B1] mv 1,B0; [B0] b <label2>;`.
+* Occurrence: rare, but used by TI compiler by default
+* Problem: Condition tracking and grouping during basic block analysis becomes more complicated. Comparing conditions registers without taking their changing content into account results in broken control flow recovery for some functions.
+* Solution: less limited constant propagation for conditionals during analysis (see reaching definitions, value numbering), sets of registers associated with boolean should be tracked

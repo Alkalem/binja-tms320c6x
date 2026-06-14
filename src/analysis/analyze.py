@@ -417,6 +417,9 @@ def __addr_is_executable(view: BinaryView, addr: int) -> bool:
     return view.is_offset_executable(addr)
 
 def __resolve_branch(branch: InstructionBranch, instr: Instruction) -> InstructionBranch:
+    '''Specify general branch type for provided instruction.
+    For example, an indirect branch to a return register is a function return.
+    '''
     match branch.type:
         case BranchType.IndirectBranch:
             # indirect target using register
@@ -429,6 +432,17 @@ def __resolve_branch(branch: InstructionBranch, instr: Instruction) -> Instructi
     return branch
 
 def __unify_branches(branches: BranchSlot) -> UnifiedSlot:
+    '''Convert collected branches for a cycle to a unified branch slot.
+
+    In one cycle, multiple conditional branches may be issued.
+    These branches and conditions are collected in a branch slot.
+    If there are conditional branches, a single false branch should exist.
+    
+    There are a number of possible cases with conditional branches:
+    1. A single conditional branch exists. There is a fallthrough false branch if this branch is not taken.
+    2. Two conditional branches with inverted conditions exist. One of these branches is converted to a false branch. An indirect branch is always classified as true case.
+    3. Two conditional branches exist, but their conditions are not inverted. This results in third case as fallthrough false branch.
+    '''
     if len(branches) == 0: return branches
     unified_branches = list()
     require_false_branch = True
@@ -462,6 +476,15 @@ def __unify_branches(branches: BranchSlot) -> UnifiedSlot:
     return unified_branches
 
 def __get_carried_branches(active_condition: ConditionType, pending_branches: PendingBranches) -> PendingBranches:
+    '''Get the pending branches carried to a target block for the branch condition.
+
+    Carried branches are pending branches that apply to the target block.
+    Because branches may be conditional, this may be a subset of the pending branches.
+    For example, if the current branch is `[A0] b`, then other conditions, especially `[!A0]`, would not be carried.
+
+    Additionally, we can sometimes generalize the condition of carried branches.
+    If the active condition is equal to a pending branch condition, the branch will be unconditional for the target block.
+    '''
     carried_branches = list()
     for branch_slot in pending_branches:
         carried_branch_slot = list()
