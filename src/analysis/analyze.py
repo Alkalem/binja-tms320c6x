@@ -353,6 +353,10 @@ def analyze_basic_blocks(arch, func: Function,
     context.finalize()
 
 def __update_context(context: FunctionContext, end_addr: int, view: BinaryView):
+    '''Add next FP header to context if the block ends in the middle of an FP.
+    
+    *Should be used at the end address of each basic block.*
+    '''
     if end_addr % FP_SIZE:
         header_suffix = view.read(end_addr, FP_SIZE - (end_addr % FP_SIZE))
         fp_header = header_suffix[-ARCH_SIZE:]
@@ -361,6 +365,11 @@ def __update_context(context: FunctionContext, end_addr: int, view: BinaryView):
             context.headers[fp_addr] = fp_header
 
 def __add_branches_to_context(context: FunctionContext, addr: int, branches: PendingBranches):
+    '''Store pending branches in context for lifting.
+    Branch types are converted to types relevant for lifting.
+
+    *Should be used at the starting address of every block with pending branches.*
+    '''
     branch_contexts = list()
     for delay, slot in enumerate(branches):
         for condition, branch, src in slot:
@@ -379,6 +388,10 @@ def __add_branches_to_context(context: FunctionContext, addr: int, branches: Pen
     context.branches[addr] = branch_contexts
 
 def __specify_branch_type(context: FunctionContext, block_start: int, branch_type: BranchType, src: Instruction, ends_block: bool, specified_branches: dict[int, list[BranchContext]]):
+    '''Specify branch type for lifting in context and collect branches issued in this block.
+    
+    The specified branches are branches from the current basic block that may be relevant if a block is split up later.
+    '''
     if block_start not in context.branches: return
     match branch_type:
         case BranchType.CallDestination:
@@ -402,6 +415,12 @@ def __specify_branch_type(context: FunctionContext, block_start: int, branch_typ
         specified_branches[block_start].append(BranchContext(src.condition, -1, il_type, src))
 
 def __transfer_specified_branches(context: FunctionContext, specified_branches: list[BranchContext], block_start: int):
+    '''Add information on branches from one block to another based on matching targets.
+    
+    This builds on the assumption that pending branches should be identical for different sources that branch to a basic block.
+    In that case, type information from one source also applies to the other.
+    Additionally, both sources are connected for lifting (aliases).
+    '''
     for branch_context in context.branches[block_start]:
         if branch_context.type != ILBranchType.UNDETERMINED: continue
         target_a = branch_context.src.operands[0]
