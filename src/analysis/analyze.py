@@ -61,6 +61,7 @@ class BlockState:
         for i in ep:
             self.sploop.process(i)
             self.conditions.process(i)
+        self.conditions.end_ep()
         self.packet += 1
         self.ep_lengths.append(len(raw))
         
