@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from typing import Optional, Sequence
 
 from tms320c6x_disassembler.types import ConditionType, Instruction, RegisterOperand, Register, ControlRegisterOperand, ControlRegister, RW
+from .condition import ConditionState
 from ..constants import ARCH_SIZE, FP_SIZE, HW_SIZE, BRANCH_DELAY
 from ..lifting import ILBranchType
 from ..util import get_delay_consumption, unwrap
@@ -54,10 +55,12 @@ class BlockState:
         self.packet: int = 0
         self.ep_lengths: list[int] = list()
         self.sploop: SploopState = SploopState()
+        self.conditions: ConditionState = ConditionState()
 
     def process(self, ep: list[Instruction], raw: bytes):
         for i in ep:
             self.sploop.process(i)
+            self.conditions.process(i)
         self.packet += 1
         self.ep_lengths.append(len(raw))
         
@@ -338,7 +341,7 @@ def analyze_basic_blocks(arch, func: Function,
                     branch_slot = pending_branches.pop(0)
                     branch_slot = __unify_branches(branch_slot)
                     for condition, branch, src in branch_slot:
-                        carried_branches = __get_carried_branches(condition, pending_branches)
+                        carried_branches = __get_carried_branches(condition, pending_branches, s.conditions)
                         handle_branch(branch, last_return_write <= BRANCH_DELAY, src, carried_branches)
             last_return_write += delay_consumption
             
@@ -505,7 +508,7 @@ def __unify_branches(branches: BranchSlot) -> UnifiedSlot:
         unified_branches.append((condition, false_branch, None))
     return unified_branches
 
-def __get_carried_branches(active_condition: ConditionType, pending_branches: PendingBranches) -> PendingBranches:
+def __get_carried_branches(active_condition: ConditionType, pending_branches: PendingBranches, cond_state: ConditionState) -> PendingBranches:
     '''Get the pending branches carried to a target block for the branch condition.
 
     Carried branches are pending branches that apply to the target block.
@@ -516,13 +519,13 @@ def __get_carried_branches(active_condition: ConditionType, pending_branches: Pe
     If the active condition is equal to a pending branch condition, the branch will be unconditional for the target block.
     '''
     carried_branches = list()
-    for branch_slot in pending_branches:
+    for delay, branch_slot in enumerate(pending_branches):
         carried_branch_slot = list()
         for condition, branch, src in branch_slot:
             if (branch.type == BranchType.FalseBranch
                     or condition == ConditionType.RESERVED):
                 continue # only carry true case
-            if (condition == active_condition or
+            if (cond_state.is_equivalent(active_condition, condition, delay) or
                     condition == ConditionType.UNCONDITIONAL):
                 carried_type = BranchType.UnconditionalBranch if branch.target else BranchType.IndirectBranch
                 carried_branch = InstructionBranch(carried_type, branch.target, branch.arch)
