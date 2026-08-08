@@ -32,23 +32,35 @@ from ..util import get_delay_consumption, unwrap
 
 
 @dataclass
-class SploopContext:
+class SploopState:
     active: bool = False
-    sploop: Optional[Instruction] = None
+    loop_instr: Optional[Instruction] = None
     start: int = 0
     end: int = 0
-
 
     def process(self, i: Instruction):
         if i.opcode.startswith('sploop'):
             assert not self.active
             self.active = True
-            self.sploop = i
+            self.loop_instr = i
         elif i.opcode.startswith('spkernel'):
             self.end = i.address
         if self.active and self.start == 0 and not i.parallel:
             self.start = i.address + i.size
 
+class BlockState:
+    def __init__(self, block: BasicBlock) -> None:
+        self.block: BasicBlock = block
+        self.packet: int = 0
+        self.ep_lengths: list[int] = list()
+        self.sploop: SploopState = SploopState()
+
+    def process(self, ep: list[Instruction], raw: bytes):
+        for i in ep:
+            self.sploop.process(i)
+        self.packet += 1
+        self.ep_lengths.append(len(raw))
+        
 @dataclass
 class BranchContext:
     condition: ConditionType
@@ -75,7 +87,7 @@ def analyze_basic_blocks(arch, func: Function,
     instr_blocks: dict[ArchAndAddr, BasicBlock] = dict()
     seen_blocks: set[ArchAndAddr] = set()
     block_carried_branches: dict[ArchAndAddr, PendingBranches] = dict()
-    sploop_blocks: dict[ArchAndAddr, SploopContext] = dict()
+    sploop_blocks: dict[ArchAndAddr, SploopState] = dict()
 
     # Start by processing the entry point of the function
     start = func.start
@@ -100,26 +112,23 @@ def analyze_basic_blocks(arch, func: Function,
         location = blocks_to_process.pop(0)
         # if not __addr_is_executable(view, location.addr):
         #     continue
-        # if location in seen_blocks:
-        #     continue
-        # seen_blocks.add(ArchAndAddr(arch, location.addr))
 
         # Create a new basic block
         block: BasicBlock = context.create_basic_block(location.arch, location.addr) # type: ignore
         assert block is not None
+        s = BlockState(block)
 
         # This architecture interpretes a delay slot as a cycle.
         # Due to parallelism and idling instructions,
         # the number of instructions per delay cycle may vary.
-        # For basic block analysis, delay is only relevant for branch instructions.
+        # For basic block analysis, delay is mostly relevant for branch instructions.
         pending_branches: PendingBranches = list()
         if location in block_carried_branches:
             pending_branches = block_carried_branches[location]
             __add_branches_to_context(function_context, location.addr, pending_branches)
         last_return_write = 255
-        sploop_context = SploopContext()
         if location in sploop_blocks:
-            sploop_context = sploop_blocks[location]
+            s.sploop = sploop_blocks[location]
 
         # Disassemble the instructions in the block
         ends_block = False
@@ -169,7 +178,8 @@ def analyze_basic_blocks(arch, func: Function,
             #TODO: change reads to max_instr_length when workaround is removed
 
             # Build execution packet by reading parallel instructions until end of fetch packet.
-            execution_packet = b""
+            ep: list[Instruction] = list()
+            ep_bytes = b""
             ep_location = location
             new_branches = list()
             is_parallel = False
@@ -182,13 +192,13 @@ def analyze_basic_blocks(arch, func: Function,
                 info = arch.get_instruction_info(instr_bytes, location.addr)
 
                 instr_blocks[location] = block
-                execution_packet += instr_bytes[:info.length]
+                ep_bytes += instr_bytes[:info.length]
                 instr = arch.disasm.decode(instr_bytes, location.addr)
                 if instr.is_invalid(): break # error case
                 if not instr.is_fp_header():
                     is_parallel = instr.parallel
+                    ep.append(instr)
 
-                sploop_context.process(instr)
                 for branch in info.branches:
                     branch = __resolve_branch(branch, instr)
                     new_branch = (info.branch_delay, instr, branch)
@@ -203,7 +213,8 @@ def analyze_basic_blocks(arch, func: Function,
                 header_next = (instr.header is not None and 
                     (location.addr + ARCH_SIZE) % FP_SIZE == 0)
                 if (not(is_parallel or header_next) or ends_block): break
-            block.add_instruction_data(execution_packet)
+            block.add_instruction_data(ep_bytes)
+            s.process(ep, ep_bytes)
             if len(new_branches):
                 for delay, instr, branch in new_branches:
                     while len(pending_branches) <= delay:
@@ -254,8 +265,8 @@ def analyze_basic_blocks(arch, func: Function,
                             ends_block = True
                             target = location.addr
                             block.add_pending_outgoing_edge(target_type, target, arch, True)
-                            if sploop_context.active:
-                                sploop_blocks[location] = sploop_context
+                            if s.sploop.active:
+                                sploop_blocks[location] = s.sploop
                         else:
                             ends_block = True
                             target = branch.target
@@ -266,23 +277,23 @@ def analyze_basic_blocks(arch, func: Function,
                         ends_block = True
                     case BranchType.UserDefinedBranch:
                         ends_block = True
-                        if sploop_context.sploop is None:
-                            sploop_context.start = block.start
+                        if s.sploop.loop_instr is None:
+                            s.sploop.start = block.start
                         else:
-                            function_context.sploop_ii[sploop_context.end] = sploop_context.sploop.operands[0].value # type: ignore
+                            function_context.sploop_ii[s.sploop.end] = s.sploop.loop_instr.operands[0].value # type: ignore
                         # used for SPLOOP exit branches
                         block.add_pending_outgoing_edge(
                             BranchType.TrueBranch,
-                            sploop_context.start,
+                            s.sploop.start,
                             arch)
                         block.add_pending_outgoing_edge(
                             BranchType.FalseBranch,
                             location.addr,
                             arch)
-                        add_target_to_process(sploop_context.start, carried_branches)
+                        add_target_to_process(s.sploop.start, carried_branches)
                         add_target_to_process(location.addr, carried_branches)
-                        sploop_context.active = False
-                        sploop_context.start = 0
+                        s.sploop.active = False
+                        s.sploop.start = 0
             
             def is_likely_call(branch: InstructionBranch, carried_branches: PendingBranches,
                     returns: bool) -> bool:
@@ -311,9 +322,9 @@ def analyze_basic_blocks(arch, func: Function,
 
             # Determine delay of execution packet and consume delay slots
             delay_consumption = 0
-            location = ArchAndAddr(arch, ep_location.addr + len(execution_packet))
+            location = ArchAndAddr(arch, ep_location.addr + len(ep_bytes))
             _header_suffix = view.read(location.addr, FP_SIZE - (location.addr % FP_SIZE))
-            for instr in arch.disasm.disasm(execution_packet+_header_suffix, ep_location.addr):
+            for instr in arch.disasm.disasm(ep_bytes+_header_suffix, ep_location.addr):
                 delay_consumption = max(get_delay_consumption(instr), delay_consumption)
                 if (instr.opcode in ('addkpc', 'callp')
                         or any((RW.write in op.access_info.rw 
@@ -331,10 +342,10 @@ def analyze_basic_blocks(arch, func: Function,
                         handle_branch(branch, last_return_write <= BRANCH_DELAY, src, carried_branches)
             last_return_write += delay_consumption
             
-            location = ArchAndAddr(arch, ep_location.addr + len(execution_packet))
+            location = ArchAndAddr(arch, ep_location.addr + len(ep_bytes))
 
             # update and check termination conditions
-            total_size += len(execution_packet)
+            total_size += len(ep_bytes)
 
             if ends_block: break
             if (max_size and total_size > max_size):
