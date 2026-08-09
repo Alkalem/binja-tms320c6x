@@ -61,7 +61,6 @@ class BlockState:
         for i in ep:
             self.sploop.process(i)
             self.conditions.process(i)
-        self.conditions.end_ep()
         self.packet += 1
         self.ep_lengths.append(len(raw))
         
@@ -338,6 +337,7 @@ def analyze_basic_blocks(arch, func: Function,
                     last_return_write = 0
                 if not (instr.parallel or instr.is_fp_header()): break
             for _ in range(delay_consumption):
+                s.conditions.end_ep()
                 if len(pending_branches):
                     branch_slot = pending_branches.pop(0)
                     branch_slot = __unify_branches(branch_slot)
@@ -523,14 +523,16 @@ def __get_carried_branches(active_condition: ConditionType, pending_branches: Pe
     for delay, branch_slot in enumerate(pending_branches):
         carried_branch_slot = list()
         for condition, branch, src in branch_slot:
-            if (branch.type == BranchType.FalseBranch
-                    or condition == ConditionType.RESERVED):
-                continue # only carry true case
+            if (condition == ConditionType.RESERVED
+                    or active_condition == ConditionType(condition.value ^ 1)):
+                continue # do not carry fallthrough and impossible branches
             if (cond_state.is_equivalent(active_condition, condition, delay) or
                     condition == ConditionType.UNCONDITIONAL):
                 carried_type = BranchType.UnconditionalBranch if branch.target else BranchType.IndirectBranch
                 carried_branch = InstructionBranch(carried_type, branch.target, branch.arch)
                 carried_branch_slot.append((ConditionType.UNCONDITIONAL, carried_branch, src))
+            else:
+                carried_branch_slot.append((condition, branch, src))
         carried_branches.append(carried_branch_slot)
     while len(carried_branches) and len(carried_branches[-1]) == 0:
         carried_branches.pop()
