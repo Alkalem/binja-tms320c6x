@@ -23,9 +23,9 @@ from binaryninja.log import log_info, log_debug
 
 
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import NamedTuple, Optional, Sequence
 
-from tms320c6x_disassembler.types import ConditionType, Instruction, RegisterOperand, Register, ControlRegisterOperand, ControlRegister, RW
+from tms320c6x_disassembler.types import ConditionType, Instruction, RegisterOperand, Register, RW
 from .condition import ConditionState
 from ..constants import ARCH_SIZE, FP_SIZE, HW_SIZE, BRANCH_DELAY
 from ..lifting import ILBranchType
@@ -78,8 +78,17 @@ class FunctionContext:
         self.branches: dict[int, list[BranchContext]] = dict()
         self.aliases: dict[int, int] = dict()
 
-BranchSlot = Sequence[tuple[ConditionType, InstructionBranch, Instruction]]
-UnifiedSlot = Sequence[tuple[ConditionType, InstructionBranch, Instruction | None]]
+class QueuedBranch(NamedTuple):
+    condition: ConditionType
+    branch: InstructionBranch
+    instruction: Instruction
+BranchSlot = Sequence[QueuedBranch]
+class AnalyzedBranch(NamedTuple):
+    condition: ConditionType
+    edge_type: BranchType
+    branch: InstructionBranch
+    instruction: Instruction | None
+UnifiedSlot = Sequence[AnalyzedBranch]
 PendingBranches = list[BranchSlot]
 
 def analyze_basic_blocks(arch, func: Function, 
@@ -203,7 +212,6 @@ def analyze_basic_blocks(arch, func: Function,
                     ep.append(instr)
 
                 for branch in info.branches:
-                    branch = __resolve_branch(branch, instr)
                     new_branch = (info.branch_delay, instr, branch)
                     new_branches.append(new_branch)
 
@@ -225,12 +233,15 @@ def analyze_basic_blocks(arch, func: Function,
                     pending_branches[delay].append((instr.condition, branch, instr))
 
             #TODO: handle function branches and branches with pending delay
-            def handle_branch(branch: InstructionBranch, returns: bool, src: Optional[Instruction], carried_branches: PendingBranches):
+            def handle_branch(analyzed_branch: AnalyzedBranch, returns: bool, carried_branches: PendingBranches):
+                branch = analyzed_branch.branch
+                src = analyzed_branch.instruction
                 log_debug(f'Handling {branch.type.name} @{location.addr:08x} to {branch.target:08x} (return? {returns})')
                 nonlocal ends_block
-                target_type = branch.type
+                target_type = analyzed_branch.edge_type
 
-                match target_type:
+                # TODO: types and unification are off for conditional calls (and skipped targets)
+                match branch.type:
                     case BranchType.UnconditionalBranch|BranchType.TrueBranch:
                         ends_block = True
                         if branch.target == 0: return
@@ -251,7 +262,6 @@ def analyze_basic_blocks(arch, func: Function,
                         __specify_branch_type(function_context, block.start, target_type, unwrap(src), ends_block, specified_branches)
                     case BranchType.IndirectBranch:
                         ends_block = True
-                        target_type = branch.type
                         if is_likely_call(branch, carried_branches, returns):
                             assert len(carried_branches) == 0
                             target_type = BranchType.CallDestination
@@ -263,21 +273,17 @@ def analyze_basic_blocks(arch, func: Function,
                             add_target_to_process(indirect_branch.dest_addr, carried_branches)
                         __specify_branch_type(function_context, block.start, target_type, unwrap(src), ends_block, specified_branches)
                     case BranchType.FalseBranch:
-                        if branch.target == 0:
-                            # fallthrough false condition
-                            ends_block = True
-                            target = location.addr
-                            block.add_pending_outgoing_edge(target_type, target, arch, True)
-                            if s.sploop.active:
-                                sploop_blocks[location] = s.sploop
-                        else:
-                            ends_block = True
-                            target = branch.target
-                            block.add_pending_outgoing_edge(target_type, target, arch)
-                            __specify_branch_type(function_context, block.start, target_type, unwrap(src), ends_block, specified_branches)
+                        assert branch.target == 0
+                        # fallthrough false condition
+                        ends_block = True
+                        target = location.addr
+                        block.add_pending_outgoing_edge(target_type, target, arch, True)
+                        if s.sploop.active:
+                            sploop_blocks[location] = s.sploop
                         add_target_to_process(target, carried_branches)
                     case BranchType.FunctionReturn:
                         ends_block = True
+                        block.can_exit = True
                     case BranchType.UserDefinedBranch:
                         ends_block = True
                         if s.sploop.loop_instr is None:
@@ -341,9 +347,9 @@ def analyze_basic_blocks(arch, func: Function,
                 if len(pending_branches):
                     branch_slot = pending_branches.pop(0)
                     branch_slot = __unify_branches(branch_slot)
-                    for condition, branch, src in branch_slot:
-                        carried_branches = __get_carried_branches(condition, pending_branches, s.conditions)
-                        handle_branch(branch, last_return_write <= BRANCH_DELAY, src, carried_branches)
+                    for ab in branch_slot:
+                        carried_branches = __get_carried_branches(ab.condition, pending_branches, s.conditions)
+                        handle_branch(ab, last_return_write <= BRANCH_DELAY,  carried_branches)
             last_return_write += delay_consumption
             
             location = ArchAndAddr(arch, ep_location.addr + len(ep_bytes))
@@ -450,21 +456,6 @@ def __transfer_specified_branches(context: FunctionContext, specified_branches: 
 def __addr_is_executable(view: BinaryView, addr: int) -> bool:
     return view.is_offset_executable(addr)
 
-def __resolve_branch(branch: InstructionBranch, instr: Instruction) -> InstructionBranch:
-    '''Specify general branch type for provided instruction.
-    For example, an indirect branch to a return register is a function return.
-    '''
-    match branch.type:
-        case BranchType.IndirectBranch:
-            # indirect target using register
-            assert (isinstance(instr.operands[0], RegisterOperand)
-                    or isinstance(instr.operands[0], ControlRegisterOperand))
-            if instr.operands[0].register in (
-                    Register.B3, ControlRegister.IRP, ControlRegister.NRP):
-                # usually used as return address
-                branch = InstructionBranch(BranchType.FunctionReturn, branch.target, branch.arch)
-    return branch
-
 def __unify_branches(branches: BranchSlot) -> UnifiedSlot:
     '''Convert collected branches for a cycle to a unified branch slot.
 
@@ -477,36 +468,43 @@ def __unify_branches(branches: BranchSlot) -> UnifiedSlot:
     2. Two conditional branches with inverted conditions exist. One of these branches is converted to a false branch. An indirect branch is always classified as true case.
     3. Two conditional branches exist, but their conditions are not inverted. This results in third case as fallthrough false branch.
     '''
-    if len(branches) == 0: return branches
-    unified_branches = list()
-    require_false_branch = True
-    conditions = set()
+    if len(branches) == 0: return list()
+    assert len(branches) <= 2, 'Invalid execution packet'
+    unified_branches: UnifiedSlot = list()
+    require_fallthrough = False
+    conditions = {c for c,_,_ in branches}
+    have_return = any([b.type == BranchType.FunctionReturn for _,b,_ in branches])
     for condition, branch, src in branches:
-        if branch.type == BranchType.TrueBranch:
+        edge_type = branch.type
+        if branch.type == BranchType.FunctionReturn:
+            if condition != ConditionType.UNCONDITIONAL and len(branches) == 1:
+                require_fallthrough = True
+        elif condition != ConditionType.UNCONDITIONAL:
+            # TODO: check special branches
+            assert condition != ConditionType.RESERVED
             if ConditionType(condition.value ^ 1) in conditions:
-                require_false_branch = False
-                if branch.target == 0:
-                    # only one indirect branch per EP possible
-                    for c,b in unified_branches:
-                        if c == ConditionType(condition.value ^ 1):
-                            b.type = BranchType.FalseBranch
-                            break
+                if have_return:
+                    edge_type = branch.type
+                elif condition & 1:
+                    edge_type = BranchType.FalseBranch
                 else:
-                    branch = InstructionBranch(BranchType.FalseBranch, branch.target, branch.arch)
-            conditions.add(condition)
-        elif branch.type == BranchType.FalseBranch:
-            continue
-        else:
-            require_false_branch = False
-        unified_branches.append((condition, branch, src))
-    if require_false_branch:
+                    edge_type = BranchType.TrueBranch
+            else:
+                require_fallthrough = True
+                edge_type = BranchType.TrueBranch
+        unified_branches.append(AnalyzedBranch(condition, edge_type, branch, src))
+    if require_fallthrough:
         if len(conditions) == 1:
             condition = ConditionType(conditions.pop().value ^ 1)
         else:
             # Cannot express negation in one condition
             condition = ConditionType.RESERVED
+        if have_return:
+            edge_type = BranchType.UnconditionalBranch
+        else:
+            edge_type = BranchType.FalseBranch
         false_branch = InstructionBranch(BranchType.FalseBranch, 0, branch.arch)
-        unified_branches.append((condition, false_branch, None))
+        unified_branches.append(AnalyzedBranch(condition, edge_type, false_branch, None))
     return unified_branches
 
 def __get_carried_branches(active_condition: ConditionType, pending_branches: PendingBranches, cond_state: ConditionState) -> PendingBranches:

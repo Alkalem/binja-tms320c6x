@@ -24,7 +24,8 @@ from .constants import ARCH_SIZE, BRANCH_DELAY
 from tms320c6x_disassembler import Disassembler as C6xDisassembler
 from tms320c6x_disassembler.types import Operand, Instruction, Register, \
         ImmediateOperand, RegisterOperand, ControlRegisterOperand, \
-        RegisterPairOperand, MemoryOperand, FuncUnitsOperand, ISA
+        RegisterPairOperand, MemoryOperand, FuncUnitsOperand, ISA, \
+        ControlRegister
 
 @dataclass(frozen=True)
 class _BranchInfo:
@@ -101,11 +102,7 @@ class Disassembler:
         branch_info = self.__get_branch(instr)
         if branch_info is not None:
             result.branch_delay = branch_info.delay
-            if instr.condition.branch is not None and branch_info.conditional:
-                    result.add_branch(BranchType.TrueBranch, branch_info.target)
-                    result.add_branch(BranchType.FalseBranch)
-            else:
-                result.add_branch(branch_info.type, branch_info.target)
+            result.add_branch(branch_info.type, branch_info.target)
         return result
     
     def __get_branch(self, instr:Instruction) -> Optional[_BranchInfo]:
@@ -127,8 +124,12 @@ class Disassembler:
             case ImmediateOperand(target):
                 return _BranchInfo(delay, BranchType.UnconditionalBranch,
                         target, conditional)
-            case RegisterOperand(_)|ControlRegisterOperand(_):
-                return _BranchInfo(delay, BranchType.IndirectBranch, 
+            case RegisterOperand(r) | ControlRegisterOperand(r):
+                branch_type = BranchType.IndirectBranch
+                if r in (Register.B3, ControlRegister.IRP, ControlRegister.NRP):
+                    # usually used as return address
+                    branch_type = BranchType.FunctionReturn
+                return _BranchInfo(delay, branch_type, 
                         0, conditional)
     
 
