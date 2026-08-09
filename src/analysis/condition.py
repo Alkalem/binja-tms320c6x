@@ -14,6 +14,8 @@
 # You should have received a copy of the GNU General Public License along with
 # this program. If not, see <http://www.gnu.org/licenses/>.
 
+from binaryninja.log import log_info
+
 from tms320c6x_disassembler.types import ConditionType, Instruction, RW, RegisterOperand, RegisterPairOperand, Register, Operand, ImmediateOperand
 
 from ..util import unwrap
@@ -89,7 +91,7 @@ class ConditionState:
     def __explore_conditions(self, start: set[ConditionType], delay: int, delta: int) -> set[ConditionType]:
         equivalent_conditions = start
         if delay == 0: return equivalent_conditions
-        for moves in self.moves[-delay: -delay+delta]:
+        for moves in self.moves[-delay-1: -delay-1+delta]:
             next_equivalent = set()
             for c in equivalent_conditions:
                 next_equivalent.update(moves[c])
@@ -103,7 +105,9 @@ class ConditionState:
     def is_impossible(self, src: ConditionType, delay: int, dst: ConditionType, delta: int) -> bool:
         impossible_conditions = self.__explore_conditions(
                 {ConditionType(src.value ^ 1)}, delay, delta)
-        return dst in impossible_conditions
+        equivalent_conditions = self.__explore_conditions({src}, delay, delta)
+        return (dst in impossible_conditions
+                or ConditionType(dst.value ^ 1) in equivalent_conditions)
 
     # def __join(self, a: ConditionType, b: ConditionType):
     #     if self.lookup[a] == self.lookup[b]: return
