@@ -82,12 +82,14 @@ class QueuedBranch(NamedTuple):
     condition: ConditionType
     branch: InstructionBranch
     instruction: Instruction
+    delay: int
 BranchSlot = Sequence[QueuedBranch]
 class AnalyzedBranch(NamedTuple):
     condition: ConditionType
     edge_type: BranchType
     branch: InstructionBranch
     instruction: Instruction | None
+    delay: int
 UnifiedSlot = Sequence[AnalyzedBranch]
 PendingBranches = list[BranchSlot]
 
@@ -230,7 +232,7 @@ def analyze_basic_blocks(arch, func: Function,
                 for delay, instr, branch in new_branches:
                     while len(pending_branches) <= delay:
                         pending_branches.append(list())
-                    pending_branches[delay].append((instr.condition, branch, instr))
+                    pending_branches[delay].append(QueuedBranch(instr.condition, branch, instr, delay))
 
             #TODO: handle function branches and branches with pending delay
             def handle_branch(analyzed_branch: AnalyzedBranch, returns: bool, carried_branches: PendingBranches):
@@ -322,8 +324,8 @@ def analyze_basic_blocks(arch, func: Function,
                 else:
                     for carried_a, carried_b in zip(block_carried_branches[target],carried_branches):
                         for branch_a, branch_b in zip(carried_a, carried_b):
-                            condition_a, branch_a, src_a = branch_a
-                            condition_b, branch_b, src_b = branch_b
+                            condition_a, branch_a, src_a, _ = branch_a
+                            condition_b, branch_b, src_b, _ = branch_b
                             # Sources should differ at least in their address
                             assert condition_a == condition_b and branch_a == branch_b
                             function_context.aliases[src_b.address] = src_a.address
@@ -347,9 +349,9 @@ def analyze_basic_blocks(arch, func: Function,
                 if len(pending_branches):
                     branch_slot = pending_branches.pop(0)
                     branch_slot = __unify_branches(branch_slot)
-                    for ab in branch_slot:
-                        carried_branches = __get_carried_branches(ab.condition, pending_branches, s.conditions)
-                        handle_branch(ab, last_return_write <= BRANCH_DELAY,  carried_branches)
+                    for active_branch in branch_slot:
+                        carried_branches = __get_carried_branches(active_branch, pending_branches, s.conditions)
+                        handle_branch(active_branch, last_return_write <= BRANCH_DELAY,  carried_branches)
             last_return_write += delay_consumption
             
             location = ArchAndAddr(arch, ep_location.addr + len(ep_bytes))
@@ -393,7 +395,7 @@ def __add_branches_to_context(context: FunctionContext, addr: int, branches: Pen
     '''
     branch_contexts = list()
     for delay, slot in enumerate(branches):
-        for condition, branch, src in slot:
+        for condition, branch, src, _ in slot:
             assert src is not None
             match branch.type:
                 case BranchType.CallDestination:
@@ -472,9 +474,9 @@ def __unify_branches(branches: BranchSlot) -> UnifiedSlot:
     assert len(branches) <= 2, 'Invalid execution packet'
     unified_branches: UnifiedSlot = list()
     require_fallthrough = False
-    conditions = {c for c,_,_ in branches}
-    have_return = any([b.type == BranchType.FunctionReturn for _,b,_ in branches])
-    for condition, branch, src in branches:
+    conditions = {c for c,_,_,_ in branches}
+    have_return = any([b.type == BranchType.FunctionReturn for _,b,_,_ in branches])
+    for condition, branch, src, delay in branches:
         edge_type = branch.type
         if branch.type == BranchType.FunctionReturn:
             if condition != ConditionType.UNCONDITIONAL and len(branches) == 1:
@@ -492,7 +494,7 @@ def __unify_branches(branches: BranchSlot) -> UnifiedSlot:
             else:
                 require_fallthrough = True
                 edge_type = BranchType.TrueBranch
-        unified_branches.append(AnalyzedBranch(condition, edge_type, branch, src))
+        unified_branches.append(AnalyzedBranch(condition, edge_type, branch, src, delay))
     if require_fallthrough:
         if len(conditions) == 1:
             condition = ConditionType(conditions.pop().value ^ 1)
@@ -504,33 +506,35 @@ def __unify_branches(branches: BranchSlot) -> UnifiedSlot:
         else:
             edge_type = BranchType.FalseBranch
         false_branch = InstructionBranch(BranchType.FalseBranch, 0, branch.arch)
-        unified_branches.append(AnalyzedBranch(condition, edge_type, false_branch, None))
+        unified_branches.append(AnalyzedBranch(condition, edge_type, false_branch, None, 0))
     return unified_branches
 
-def __get_carried_branches(active_condition: ConditionType, pending_branches: PendingBranches, cond_state: ConditionState) -> PendingBranches:
+def __get_carried_branches(active_branch: AnalyzedBranch, pending_branches: PendingBranches, cond_state: ConditionState) -> PendingBranches:
     '''Get the pending branches carried to a target block for the branch condition.
 
     Carried branches are pending branches that apply to the target block.
     Because branches may be conditional, this may be a subset of the pending branches.
-    For example, if the current branch is `[A0] b`, then other conditions, especially `[!A0]`, would not be carried.
+    For example, if the current branch is `[A0] b`, then other conditions, like `[!A0]`, would not be carried.
 
     Additionally, we can sometimes generalize the condition of carried branches.
     If the active condition is equal to a pending branch condition, the branch will be unconditional for the target block.
     '''
+    active_condition = active_branch.condition
+    delay = active_branch.delay
     carried_branches = list()
-    for delay, branch_slot in enumerate(pending_branches):
+    for delta, branch_slot in enumerate(pending_branches, start=1):
         carried_branch_slot = list()
-        for condition, branch, src in branch_slot:
+        for condition, branch, src, branch_delay in branch_slot:
             if (condition == ConditionType.RESERVED
-                    or active_condition == ConditionType(condition.value ^ 1)):
+                    or cond_state.is_impossible(active_condition, delay, condition, delta)):
                 continue # do not carry fallthrough and impossible branches
-            if (cond_state.is_equivalent(active_condition, condition, delay) or
+            if (cond_state.is_equivalent(active_condition, delay, condition, delta) or
                     condition == ConditionType.UNCONDITIONAL):
                 carried_type = BranchType.UnconditionalBranch if branch.target else BranchType.IndirectBranch
                 carried_branch = InstructionBranch(carried_type, branch.target, branch.arch)
-                carried_branch_slot.append((ConditionType.UNCONDITIONAL, carried_branch, src))
+                carried_branch_slot.append(QueuedBranch(ConditionType.UNCONDITIONAL, carried_branch, src, branch_delay))
             else:
-                carried_branch_slot.append((condition, branch, src))
+                carried_branch_slot.append(QueuedBranch(condition, branch, src, branch_delay))
         carried_branches.append(carried_branch_slot)
     while len(carried_branches) and len(carried_branches[-1]) == 0:
         carried_branches.pop()
