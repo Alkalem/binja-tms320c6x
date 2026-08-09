@@ -14,8 +14,6 @@
 # You should have received a copy of the GNU General Public License along with
 # this program. If not, see <http://www.gnu.org/licenses/>.
 
-from binaryninja.log import log_info
-
 from tms320c6x_disassembler.types import ConditionType, Instruction, RW, RegisterOperand, RegisterPairOperand, Register, Operand, ImmediateOperand
 
 from ..util import unwrap
@@ -32,7 +30,8 @@ CONDITION_REGISTERS = {
 
 class ConditionState:
     def __init__(self) -> None:
-        self.moves: list[dict[ConditionType, list[ConditionType]]] = list()
+        self.moves: list[dict[ConditionType, set[ConditionType]]] = list()
+        self.queued_discards: list[list[tuple[ConditionType, ConditionType]]] = list()
         self.lookup = dict()
         for c in ConditionType:
             equivalence_class = {c,}
@@ -40,18 +39,26 @@ class ConditionState:
         self.__init_moves()
 
     def __init_moves(self):
-        self.current_moves: dict[ConditionType, list[ConditionType]] = dict()
+        self.current_moves: dict[ConditionType, set[ConditionType]] = dict()
         for c in ConditionType:
-            self.current_moves[c] = [c]
+            self.current_moves[c] = {c}
+        if len(self.queued_discards):
+            for a, b in self.queued_discards.pop(0):
+                self.current_moves[a].discard(b)
+
+    def __queue_discard(self, delay: int, src: ConditionType, dst: ConditionType):
+        while len(self.queued_discards) < delay:
+            self.queued_discards.append(list())
+        self.queued_discards[delay-1].append((src, dst))
 
     def process(self, i: Instruction):
-        # TODO: moves should group conditions
+        # TODO: moves should always group conditions
         if i.condition == ConditionType.UNCONDITIONAL and is_cond_move(i):
             match i.operands[-2]:
                 case RegisterOperand(src):
                     dst = unwrap(_get_register(i.operands[-1]))
                     for a, b in zip(CONDITION_REGISTERS[src], CONDITION_REGISTERS[dst]):
-                        self.current_moves[a].append(b)
+                        self.current_moves[a].add(b)
         elif is_cond_set(i):
             if i.condition == ConditionType.UNCONDITIONAL:
                 pass # TODO: target is always true or always false
@@ -59,9 +66,9 @@ class ConditionState:
                 src = i.condition
                 dst_index = 0 if _get_value(i.operands[0]) else 1
                 dst = CONDITION_REGISTERS[_get_register(i.operands[-1])][dst_index]
-                self.current_moves[src].append(dst)
+                self.current_moves[src].add(dst)
         else:
-        # TODO: unknown writes should break up groups
+        # TODO: unknown writes should always break up groups
             for operand in i.operands:
                 # Check if condition register is written to
                 written_registers = list()
@@ -74,15 +81,20 @@ class ConditionState:
                         case _:
                             continue
                     match operand:
-                        case RegisterPairOperand(_, h): written_registers.append(h)
+                        case RegisterPairOperand(_, h): 
+                            if h in CONDITION_REGISTERS:
+                                written_registers.append(h)
                 else: continue
 
-                # TODO: take delay into account
-                if operand.access_info.low_last > 1: continue
+                # TODO: fix cycle for high writes
+                if operand.access_info.low_first > 1: 
+                    delay = operand.access_info.low_first
+                    for r in written_registers:
+                        for c in CONDITION_REGISTERS[r]:
+                            self.__queue_discard(delay, c, c)
                 for r in written_registers:
                     for c in CONDITION_REGISTERS[r]:
-                        if c in self.current_moves[c]:
-                            self.current_moves[c].remove(c)
+                        self.current_moves[c].discard(c)
 
     def end_ep(self):
         self.moves.append(self.current_moves)
@@ -100,7 +112,10 @@ class ConditionState:
 
     def is_equivalent(self, src: ConditionType, delay: int, dst: ConditionType, delta: int) -> bool:
         equivalent_conditions = self.__explore_conditions({src}, delay, delta)
-        return dst in equivalent_conditions
+        negated_conditions = self.__explore_conditions(
+                        {ConditionType(src.value ^ 1)}, delay, delta)
+        return (dst in equivalent_conditions
+                or ConditionType(dst.value ^ 1) in negated_conditions)
 
     def is_impossible(self, src: ConditionType, delay: int, dst: ConditionType, delta: int) -> bool:
         impossible_conditions = self.__explore_conditions(
