@@ -46,25 +46,41 @@ class ConditionState:
             for a, b in self.queued_discards.pop(0):
                 self.current_moves[a].discard(b)
 
-    def __queue_discard(self, delay: int, src: ConditionType, dst: ConditionType):
+    def __queue_discard(self, delay: int, reg: Register):
         while len(self.queued_discards) < delay:
             self.queued_discards.append(list())
-        self.queued_discards[delay-1].append((src, dst))
+        for c in CONDITION_REGISTERS[reg]:
+            self.queued_discards[delay-1].append((c, c))
+
+    def __discard(self, delay: int, reg: Register):
+        if delay > 0:
+            self.__queue_discard(delay, reg)
+        else:
+            for c in CONDITION_REGISTERS[reg]:
+                self.current_moves[c].discard(c)
+
+    def __add_move(self, src: ConditionType, dst: ConditionType):
+        if ConditionType(dst.value ^ 1) in self.current_moves[src]:
+            self.current_moves[src].remove(ConditionType(dst.value ^ 1))
+        self.current_moves[src].add(dst)
+
+    def __add_moves(self, src: Register, dst: Register):
+        if not (src in CONDITION_REGISTERS and dst in CONDITION_REGISTERS):
+            raise ValueError('Move with non-condition register')
+        for a, b in zip(CONDITION_REGISTERS[src], CONDITION_REGISTERS[dst]):
+            self.__add_move(a, b)
 
     def process(self, i: Instruction):
-        # TODO: moves should always group conditions
         if i.condition == ConditionType.UNCONDITIONAL and is_cond_move(i):
             match i.operands[-2]:
                 case RegisterOperand(src) | RegisterPairOperand(src, _):
                     dst = op_get_register(i.operands[-1])
-                    for a, b in zip(CONDITION_REGISTERS[src], CONDITION_REGISTERS[dst]):
-                        self.current_moves[a].add(b)
+                    self.__add_moves(src, dst)
             if isinstance(i.operands[-2], RegisterPairOperand):
                 src = op_get_high_register(i.operands[-2])
                 dst = op_get_high_register(i.operands[-1])
                 if (src in CONDITION_REGISTERS and dst in CONDITION_REGISTERS):
-                    for a, b in zip(CONDITION_REGISTERS[src], CONDITION_REGISTERS[dst]):
-                        self.current_moves[a].add(b)
+                    self.__add_moves(src, dst)
         elif is_cond_set(i):
             if i.condition == ConditionType.UNCONDITIONAL:
                 pass # TODO: target is always true or always false
@@ -72,9 +88,8 @@ class ConditionState:
                 src = i.condition
                 dst_index = 0 if op_get_value(i.operands[0]) else 1
                 dst = CONDITION_REGISTERS[op_get_register(i.operands[-1])][dst_index]
-                self.current_moves[src].add(dst)
+                self.__add_move(src, dst)
         else:
-        # TODO: unknown writes should always break up groups
             for operand in i.operands:
                 # Check if condition register is written to
                 written_registers = list()
@@ -83,24 +98,20 @@ class ConditionState:
                         case RegisterOperand(r) | RegisterPairOperand(r, _):
                             if r not in CONDITION_REGISTERS:
                                 continue
-                            written_registers.append(r)
+                            delay = operand.access_info.low_first
+                            written_registers.append((delay, r))
                         case _:
                             continue
                     match operand:
                         case RegisterPairOperand(_, h): 
                             if h in CONDITION_REGISTERS:
-                                written_registers.append(h)
+                                delay = operand.access_info.high_first
+                                written_registers.append((delay, h))
                 else: continue
 
                 # TODO: fix cycle for high writes
-                if operand.access_info.low_first > 1: 
-                    delay = operand.access_info.low_first
-                    for r in written_registers:
-                        for c in CONDITION_REGISTERS[r]:
-                            self.__queue_discard(delay, c, c)
-                for r in written_registers:
-                    for c in CONDITION_REGISTERS[r]:
-                        self.current_moves[c].discard(c)
+                for delay, r in written_registers:
+                    self.__discard(delay - 1, r)
 
     def end_ep(self):
         self.moves.append(self.current_moves)
@@ -109,6 +120,7 @@ class ConditionState:
     def __explore_conditions(self, start: set[ConditionType], delay: int, delta: int) -> set[ConditionType]:
         equivalent_conditions = start
         if delay == 0: return equivalent_conditions
+        # -1 because branches trigger at the start of the cycle after their delay
         for moves in self.moves[-delay-1: -delay-1+delta]:
             next_equivalent = set()
             for c in equivalent_conditions:
