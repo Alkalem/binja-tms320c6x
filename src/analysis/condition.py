@@ -16,7 +16,7 @@
 
 from tms320c6x_disassembler.types import ConditionType, Instruction, RW, RegisterOperand, RegisterPairOperand, Register, Operand, ImmediateOperand
 
-from ..util import unwrap
+from ..util import op_get_high_register, op_get_register, op_get_value
 
 
 CONDITION_REGISTERS = {
@@ -55,8 +55,14 @@ class ConditionState:
         # TODO: moves should always group conditions
         if i.condition == ConditionType.UNCONDITIONAL and is_cond_move(i):
             match i.operands[-2]:
-                case RegisterOperand(src):
-                    dst = unwrap(_get_register(i.operands[-1]))
+                case RegisterOperand(src) | RegisterPairOperand(src, _):
+                    dst = op_get_register(i.operands[-1])
+                    for a, b in zip(CONDITION_REGISTERS[src], CONDITION_REGISTERS[dst]):
+                        self.current_moves[a].add(b)
+            if isinstance(i.operands[-2], RegisterPairOperand):
+                src = op_get_high_register(i.operands[-2])
+                dst = op_get_high_register(i.operands[-1])
+                if (src in CONDITION_REGISTERS and dst in CONDITION_REGISTERS):
                     for a, b in zip(CONDITION_REGISTERS[src], CONDITION_REGISTERS[dst]):
                         self.current_moves[a].add(b)
         elif is_cond_set(i):
@@ -64,8 +70,8 @@ class ConditionState:
                 pass # TODO: target is always true or always false
             else:
                 src = i.condition
-                dst_index = 0 if _get_value(i.operands[0]) else 1
-                dst = CONDITION_REGISTERS[_get_register(i.operands[-1])][dst_index]
+                dst_index = 0 if op_get_value(i.operands[0]) else 1
+                dst = CONDITION_REGISTERS[op_get_register(i.operands[-1])][dst_index]
                 self.current_moves[src].add(dst)
         else:
         # TODO: unknown writes should always break up groups
@@ -124,47 +130,27 @@ class ConditionState:
         return (dst in impossible_conditions
                 or ConditionType(dst.value ^ 1) in equivalent_conditions)
 
-    # def __join(self, a: ConditionType, b: ConditionType):
-    #     if self.lookup[a] == self.lookup[b]: return
-    #     equivalence_class = set()
-    #     for c in self.lookup[a]:
-    #         equivalence_class.add(c)
-    #     for c in self.lookup[b]:
-    #         equivalence_class.add(c)
-    #     for c in equivalence_class:
-    #         self.lookup[c] = equivalence_class
-    #     for c in equivalence_class:
-    #         if ConditionType(c.value ^ 1) in equivalence_class:
-    #             equivalence_class.add(ConditionType.UNCONDITIONAL)
-
 ### Condition util ###
 
 def is_cond_move(i: Instruction) -> bool:
     match i.opcode:
-        case 'mv' | 'or' | 'and':
-            if (_get_register(i.operands[-2]) in CONDITION_REGISTERS
-                and _get_register(i.operands[-1]) in CONDITION_REGISTERS):
+        case 'mv':
+            if (op_get_register(i.operands[0]) in CONDITION_REGISTERS
+                    and op_get_register(i.operands[1]) in CONDITION_REGISTERS):
+                return True
+        case 'or' | 'and':
+            if (isinstance(i.operands[0], ImmediateOperand)
+                    and op_get_value(i.operands[0]) == 0
+                    and op_get_register(i.operands[1]) in CONDITION_REGISTERS
+                    and op_get_register(i.operands[2]) in CONDITION_REGISTERS):
                 return True
     return False
 
 def is_cond_set(i: Instruction) -> bool:
     match i.opcode:
         case 'mvk':
-            if (unwrap(_get_register(i.operands[-1])) in CONDITION_REGISTERS):
+            if (op_get_register(i.operands[-1]) in CONDITION_REGISTERS):
                 return True
     return False
-
-# please forgive the following lines
-def _get_register(o: Operand) -> Register:
-    match o:
-        case RegisterOperand(r) | RegisterPairOperand(r, _):
-            return r
-    raise ValueError
-
-def _get_value(o: Operand) -> int:
-    match o:
-        case ImmediateOperand(v):
-            return v
-    raise ValueError
 
 

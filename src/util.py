@@ -16,7 +16,7 @@
 
 from typing import Optional, Callable
 
-from tms320c6x_disassembler.types import Instruction, ImmediateOperand
+from tms320c6x_disassembler.types import Instruction, ImmediateOperand, Operand, Register, RegisterOperand, RegisterPairOperand
 
 def get_delay_consumption(instr:Instruction):
     delay_slots = 1
@@ -62,3 +62,24 @@ class Wrapper[T]:
         if self._value is None:
             self._value = self._cb()
         return self._value
+
+def op_get_value(op: Operand) -> int:
+    '''Unpack immediate value from known ImmediateOperand.'''
+    match op:
+        case ImmediateOperand(v):
+            return v
+    raise ValueError('Inappropriate operand')
+
+def op_get_register(op: Operand) -> Register:
+    '''Unpack register from known Register(Pair)Operand.'''
+    match op:
+        case RegisterOperand(r) | RegisterPairOperand(r, _):
+            return r
+    raise ValueError('Inappropriate operand')
+
+def op_get_high_register(op: Operand) -> Register:
+    '''Unpack high register from known RegisterPairOperand.'''
+    match op:
+        case RegisterPairOperand(_, h):
+            return h
+    raise ValueError('Inappropriate operand')
