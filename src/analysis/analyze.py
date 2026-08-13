@@ -29,6 +29,7 @@ from tms320c6x_disassembler.types import ConditionType, Instruction, RegisterOpe
 from .condition import ConditionState
 from ..constants import ARCH_SIZE, FP_SIZE, HW_SIZE, BRANCH_DELAY
 from ..lifting import ILBranchType
+from ..log import Logger
 from ..util import get_delay_consumption, unwrap
 
 
@@ -327,7 +328,7 @@ def analyze_basic_blocks(arch, func: Function,
                             condition_a, branch_a, src_a, _ = branch_a
                             condition_b, branch_b, src_b, _ = branch_b
                             # Sources should differ at least in their address
-                            assert condition_a == condition_b and branch_a == branch_b
+                            Logger.log_assert(condition_a == condition_b and branch_a == branch_b, f'Unexpected different branches: ({condition_a} {branch_a}), ({condition_b} {branch_b})', addr=location.addr)
                             function_context.aliases[src_b.address] = src_a.address
 
 
@@ -471,18 +472,21 @@ def __unify_branches(branches: BranchSlot) -> UnifiedSlot:
     3. Two conditional branches exist, but their conditions are not inverted. This results in third case as fallthrough false branch.
     '''
     if len(branches) == 0: return list()
-    assert len(branches) <= 2, 'Invalid execution packet'
+    have_sploop = any([b.type == BranchType.UserDefinedBranch for _,b,_,_ in branches])
+    Logger.log_assert(len(branches) <= 2 
+            or len(branches) == 3 and have_sploop, 'Invalid execution packet')
     unified_branches: UnifiedSlot = list()
     require_fallthrough = False
     conditions = {c for c,_,_,_ in branches}
     have_return = any([b.type == BranchType.FunctionReturn for _,b,_,_ in branches])
     for condition, branch, src, delay in branches:
         edge_type = branch.type
+        if branch.type == BranchType.UserDefinedBranch:
+            pass # SPLOOP branches have special semantics
         if branch.type == BranchType.FunctionReturn:
             if condition != ConditionType.UNCONDITIONAL and len(branches) == 1:
                 require_fallthrough = True
         elif condition != ConditionType.UNCONDITIONAL:
-            # TODO: check special branches
             assert condition != ConditionType.RESERVED
             if ConditionType(condition.value ^ 1) in conditions:
                 if have_return:
