@@ -502,15 +502,17 @@ def __unify_branches(branches: BranchSlot) -> UnifiedSlot:
     if require_fallthrough:
         if len(conditions) == 1:
             condition = ConditionType(conditions.pop().value ^ 1)
+            src = unified_branches[0].instruction
         else:
             # Cannot express negation in one condition
             condition = ConditionType.RESERVED
+            src = None
         if have_return:
             edge_type = BranchType.UnconditionalBranch
         else:
             edge_type = BranchType.FalseBranch
         false_branch = InstructionBranch(BranchType.FalseBranch, 0, branch.arch)
-        unified_branches.append(AnalyzedBranch(condition, edge_type, false_branch, None, 0))
+        unified_branches.append(AnalyzedBranch(condition, edge_type, false_branch, src, BRANCH_DELAY))
     return unified_branches
 
 def __get_carried_branches(active_branch: AnalyzedBranch, pending_branches: PendingBranches, cond_state: ConditionState) -> PendingBranches:

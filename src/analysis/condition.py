@@ -25,7 +25,7 @@ CONDITION_REGISTERS = {
     Register.A2: (ConditionType.A2, ConditionType.NOT_A2),
     Register.B0: (ConditionType.B0, ConditionType.NOT_B0),
     Register.B1: (ConditionType.B1, ConditionType.NOT_B1),
-    Register.B1: (ConditionType.B2, ConditionType.NOT_B2),
+    Register.B2: (ConditionType.B2, ConditionType.NOT_B2),
 }
 
 class ConditionState:
@@ -46,18 +46,26 @@ class ConditionState:
             for a, b in self.queued_discards.pop(0):
                 self.current_moves[a].discard(b)
 
-    def __queue_discard(self, delay: int, reg: Register):
+    def __queue_discard(self, delay: int, src: ConditionType, dst: ConditionType):
         while len(self.queued_discards) < delay:
             self.queued_discards.append(list())
-        for c in CONDITION_REGISTERS[reg]:
-            self.queued_discards[delay-1].append((c, c))
+        self.queued_discards[delay-1].append((src, dst))
 
     def __discard(self, delay: int, reg: Register):
         if delay > 0:
-            self.__queue_discard(delay, reg)
+            for c in CONDITION_REGISTERS[reg]:
+                self.__queue_discard(delay, c, c)
         else:
             for c in CONDITION_REGISTERS[reg]:
                 self.current_moves[c].discard(c)
+
+    def __discard_cond(self, delay: int, src: ConditionType, dst: Register):
+        if delay > 0:
+            for c in CONDITION_REGISTERS[dst]:
+                self.__queue_discard(delay, src, c)
+        else:
+            for c in CONDITION_REGISTERS[dst]:
+                self.current_moves[src].discard(c)
 
     def __add_move(self, src: ConditionType, dst: ConditionType):
         if ConditionType(dst.value ^ 1) in self.current_moves[src]:
@@ -109,9 +117,12 @@ class ConditionState:
                                 written_registers.append((delay, h))
                 else: continue
 
-                # TODO: fix cycle for high writes
-                for delay, r in written_registers:
-                    self.__discard(delay - 1, r)
+                if i.condition == ConditionType.UNCONDITIONAL:
+                    for delay, r in written_registers:
+                        self.__discard(delay - 1, r)
+                else:
+                    for delay, r in written_registers:
+                        self.__discard_cond(delay - 1, i.condition, r)
 
     def end_ep(self):
         self.moves.append(self.current_moves)
@@ -120,7 +131,7 @@ class ConditionState:
     def __explore_conditions(self, start: set[ConditionType], delay: int, delta: int) -> set[ConditionType]:
         equivalent_conditions = start
         if delay == 0: return equivalent_conditions
-        # -1 because branches trigger at the start of the cycle after their delay
+        # -1 because moves in parallel to check belong to the same chain
         for moves in self.moves[-delay-1: -delay-1+delta]:
             next_equivalent = set()
             for c in equivalent_conditions:
@@ -130,17 +141,11 @@ class ConditionState:
 
     def is_equivalent(self, src: ConditionType, delay: int, dst: ConditionType, delta: int) -> bool:
         equivalent_conditions = self.__explore_conditions({src}, delay, delta)
-        negated_conditions = self.__explore_conditions(
-                        {ConditionType(src.value ^ 1)}, delay, delta)
-        return (dst in equivalent_conditions
-                or ConditionType(dst.value ^ 1) in negated_conditions)
+        return dst in equivalent_conditions
 
     def is_impossible(self, src: ConditionType, delay: int, dst: ConditionType, delta: int) -> bool:
-        impossible_conditions = self.__explore_conditions(
-                {ConditionType(src.value ^ 1)}, delay, delta)
         equivalent_conditions = self.__explore_conditions({src}, delay, delta)
-        return (dst in impossible_conditions
-                or ConditionType(dst.value ^ 1) in equivalent_conditions)
+        return ConditionType(dst.value ^ 1) in equivalent_conditions
 
 ### Condition util ###
 
