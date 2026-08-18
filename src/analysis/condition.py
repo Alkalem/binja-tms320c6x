@@ -14,9 +14,9 @@
 # You should have received a copy of the GNU General Public License along with
 # this program. If not, see <http://www.gnu.org/licenses/>.
 
-from tms320c6x_disassembler.types import ConditionType, Instruction, RW, RegisterOperand, RegisterPairOperand, Register, Operand, ImmediateOperand
+from tms320c6x_disassembler.types import ConditionType, Instruction, RW, RegisterOperand, RegisterPairOperand, Register, ImmediateOperand
 
-from ..util import op_get_high_register, op_get_register, op_get_value
+from ..util import op_get_high_register, op_get_register, op_get_value, unwrap
 
 
 CONDITION_REGISTERS = {
@@ -32,11 +32,27 @@ class ConditionState:
     def __init__(self) -> None:
         self.moves: list[dict[ConditionType, set[ConditionType]]] = list()
         self.queued_discards: list[list[tuple[ConditionType, ConditionType]]] = list()
-        self.lookup = dict()
-        for c in ConditionType:
-            equivalence_class = {c,}
-            self.lookup[c] = equivalence_class
+        self.lookup = {r: {r,} for r in CONDITION_REGISTERS}
+        self.equivalences = [self.lookup.copy() for _ in range(6)]
         self.__init_moves()
+
+    def __split(self, a: Register):
+        if not (a in CONDITION_REGISTERS):
+            raise ValueError('Invalid non-condition register')
+        if len(self.lookup[a]) == 1: return # already separate
+        equivalence_class = self.lookup[a].difference({a,})
+        for r in equivalence_class:
+            self.lookup[r] = equivalence_class
+        self.lookup[a] = {a,}
+
+    def __join(self, a: Register, b: Register):
+        if not (a in CONDITION_REGISTERS and b in CONDITION_REGISTERS):
+            raise ValueError('Invalid non-condition register')
+        if b in self.lookup[a]: return # already joined
+        self.__split(b)
+        equivalence_class = self.lookup[a].union(self.lookup[b])
+        for r in equivalence_class:
+            self.lookup[r] = equivalence_class
 
     def __init_moves(self):
         self.current_moves: dict[ConditionType, set[ConditionType]] = dict()
@@ -77,6 +93,7 @@ class ConditionState:
             raise ValueError('Move with non-condition register')
         for a, b in zip(CONDITION_REGISTERS[src], CONDITION_REGISTERS[dst]):
             self.__add_move(a, b)
+        self.__discard(0, dst)
 
     def process(self, i: Instruction):
         if i.condition == ConditionType.UNCONDITIONAL and is_cond_move(i):
@@ -126,10 +143,28 @@ class ConditionState:
 
     def end_ep(self):
         self.moves.append(self.current_moves)
+        for r, cs in CONDITION_REGISTERS.items():
+            if any([c not in self.current_moves[c] for c in cs]):
+                self.__split(r)
+        for r, cs in CONDITION_REGISTERS.items():
+            if any([c not in self.current_moves[c] for c in cs]): continue
+            for c in self.current_moves[cs[0]]:
+                if c.value & 1 != cs[0].value & 1: continue
+                if ConditionType(c.value ^ 1) not in self.current_moves[cs[1]]: continue
+                self.__join(r, unwrap(c.register))
+        self.equivalences.append(self.lookup.copy())
         self.__init_moves()
 
     def __explore_conditions(self, start: set[ConditionType], delay: int, delta: int) -> set[ConditionType]:
-        equivalent_conditions = start
+        equivalent_conditions = set()
+        for c in start:
+            if c.register is None:
+                equivalent_conditions.add(c)
+            else:
+                registers = self.equivalences[-delay-2][unwrap(c.register)]
+                i = CONDITION_REGISTERS[unwrap(c.register)].index(c)
+                equivalent_conditions.update({CONDITION_REGISTERS[r][i] 
+                        for r in registers})
         if delay == 0: return equivalent_conditions
         # -1 because moves in parallel to check belong to the same chain
         for moves in self.moves[-delay-1: -delay-1+delta]:

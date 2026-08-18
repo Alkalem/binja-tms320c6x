@@ -48,3 +48,5 @@ More complex variants of this pattern may not use only a single condition value 
 To eliminate impossible branches and detect conditional branches unconditionally following others, this plugin tracks condition registers. Writes of any kind, but especially moves and conditionally setting these registers are taken into account. Queued branches are evaluated based on the active branch condition. 
 
 Tracking of condition values is limited, however. It is built for common compiler patterns and ignores other registers. This plugin does not aim to implement full value set analysis, not even for conditions. Condition analysis may not be complete, but it simplifies graphs for common cases without simplifying too much for complex cases.
+
+In addition to tracking writes in a forward direction, condition registers that carry the same value are noted. This is required for writes that occur before the first jump in a chain. Its detection is more limited, but sufficient for a common observed compiler pattern.
