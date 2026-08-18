@@ -461,6 +461,15 @@ def __addr_is_executable(view: BinaryView, addr: int) -> bool:
     return view.is_offset_executable(addr)
 
 def __merge_branches(branches: BranchSlot, pending_branches: PendingBranches) -> BranchSlot:
+    '''Merge branches from the current branch slot and pending branches.
+    Some patterns of queued branches need to be analyzed together.
+    This function groups branches by target and updates branch slots as required.
+
+    Short loops without SPLOOP require a prolog where branches and instructions are queued.
+    Branches from the prolog may lack the loop condition.
+    For example in do-while loops and for loops with minimum repetitions.
+    This function groups such branches, applies the loop condition to the first branch, and removes the duplicates from the queue.
+    '''
     merged_branches = list()
     for b in branches:
         merged_branch = b
@@ -474,6 +483,17 @@ def __merge_branches(branches: BranchSlot, pending_branches: PendingBranches) ->
                     merged_branch = QueuedBranch(o.condition, b.branch, o.instruction, b.delay)
                     break
         merged_branches.append(merged_branch)
+        if merged_branch == b: continue
+        # collapse short loop queued branches
+        for i, other_slot in enumerate(pending_branches):
+            new_slot = list()
+            for o in other_slot:
+                if (b.branch != o.branch):
+                    new_slot.append(o)
+            if new_slot != other_slot:
+                pending_branches[i] = new_slot
+        while len(pending_branches) and pending_branches[-1] == []:
+            pending_branches.pop()
     return merged_branches
 
 def __unify_branches(branches: BranchSlot) -> UnifiedSlot:
@@ -553,9 +573,7 @@ def __get_carried_branches(active_branch: AnalyzedBranch, pending_branches: Pend
                 continue # do not carry fallthrough and impossible branches
             if (cond_state.is_equivalent(active_condition, delay, condition, delta) or
                     condition == ConditionType.UNCONDITIONAL):
-                carried_type = BranchType.UnconditionalBranch if branch.target else BranchType.IndirectBranch
-                carried_branch = InstructionBranch(carried_type, branch.target, branch.arch)
-                carried_branch_slot.append(QueuedBranch(ConditionType.UNCONDITIONAL, carried_branch, src, branch_delay))
+                carried_branch_slot.append(QueuedBranch(ConditionType.UNCONDITIONAL, branch, src, branch_delay))
             else:
                 carried_branch_slot.append(QueuedBranch(condition, branch, src, branch_delay))
         carried_branches.append(carried_branch_slot)
