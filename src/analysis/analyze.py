@@ -349,6 +349,7 @@ def analyze_basic_blocks(arch, func: Function,
                 s.conditions.end_ep()
                 if len(pending_branches):
                     branch_slot = pending_branches.pop(0)
+                    branch_slot = __merge_branches(branch_slot, pending_branches)
                     branch_slot = __unify_branches(branch_slot)
                     for active_branch in branch_slot:
                         carried_branches = __get_carried_branches(active_branch, pending_branches, s.conditions)
@@ -458,6 +459,22 @@ def __transfer_specified_branches(context: FunctionContext, specified_branches: 
 
 def __addr_is_executable(view: BinaryView, addr: int) -> bool:
     return view.is_offset_executable(addr)
+
+def __merge_branches(branches: BranchSlot, pending_branches: PendingBranches) -> BranchSlot:
+    merged_branches = list()
+    for b in branches:
+        merged_branch = b
+        for other_slot in pending_branches:
+            if merged_branch != b: break
+            for o in other_slot:
+                if (b.branch == o.branch 
+                    and b.delay == o.delay 
+                    and b.condition == ConditionType.UNCONDITIONAL
+                    and o.condition != b.condition):
+                    merged_branch = QueuedBranch(o.condition, b.branch, o.instruction, b.delay)
+                    break
+        merged_branches.append(merged_branch)
+    return merged_branches
 
 def __unify_branches(branches: BranchSlot) -> UnifiedSlot:
     '''Convert collected branches for a cycle to a unified branch slot.
