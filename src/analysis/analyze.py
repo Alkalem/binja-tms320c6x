@@ -239,6 +239,7 @@ def analyze_basic_blocks(arch, func: Function,
             def handle_branch(analyzed_branch: AnalyzedBranch, returns: bool, carried_branches: PendingBranches):
                 branch = analyzed_branch.branch
                 src = analyzed_branch.instruction
+                branch_src = ArchAndAddr(arch, unwrap(src).address)
                 log_debug(f'Handling {branch.type.name} @{location.addr:08x} to {branch.target:08x} (return? {returns})')
                 nonlocal ends_block
                 target_type = analyzed_branch.edge_type
@@ -250,8 +251,9 @@ def analyze_basic_blocks(arch, func: Function,
                         if branch.target == 0: return
                         assert branch.target
                         target = ArchAndAddr(arch, branch.target)
+                        branch_end = branch_src.addr + unwrap(src).size
 
-                        if view.should_skip_target_analysis(location, func, location.addr, target):
+                        if view.should_skip_target_analysis(branch_src, func, branch_end, target):
                             return
 
                         if is_likely_call(branch, carried_branches, returns):
@@ -270,7 +272,7 @@ def analyze_basic_blocks(arch, func: Function,
                             target_type = BranchType.CallDestination
                             ends_block = not returns
                         for indirect_branch in context.indirect_branches:
-                            if (indirect_branch.source_addr != location.addr):
+                            if (indirect_branch.source_addr != branch_src.addr):
                                 continue
                             block.add_pending_outgoing_edge(target_type, indirect_branch.dest_addr, arch)
                             add_target_to_process(indirect_branch.dest_addr, carried_branches)
