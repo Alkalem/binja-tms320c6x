@@ -31,10 +31,12 @@ CONDITION_REGISTERS = {
 class ConditionState:
     def __init__(self) -> None:
         self.moves: list[dict[ConditionType, set[ConditionType]]] = list()
-        self.queued_discards: list[list[tuple[ConditionType, ConditionType]]] = list()
+        self.queued_discards: list[set[ConditionType]] = list()
+        self.cond_discards: list[list[tuple[ConditionType, Register, int]]] = list()
         self.lookup = {r: {r,} for r in CONDITION_REGISTERS}
         self.equivalences = [self.lookup.copy() for _ in range(6)]
         self.__init_moves()
+        self.current_cond_discards: list[tuple[ConditionType, Register, int]] = list()
 
     def __split(self, a: Register):
         if not (a in CONDITION_REGISTERS):
@@ -59,29 +61,24 @@ class ConditionState:
         for c in ConditionType:
             self.current_moves[c] = {c}
         if len(self.queued_discards):
-            for a, b in self.queued_discards.pop(0):
-                self.current_moves[a].discard(b)
+            for c in self.queued_discards.pop(0):
+                self.current_moves[c].discard(c)
 
-    def __queue_discard(self, delay: int, src: ConditionType, dst: ConditionType):
+    def __queue_discard(self, delay: int, dst: ConditionType):
         while len(self.queued_discards) < delay:
-            self.queued_discards.append(list())
-        self.queued_discards[delay-1].append((src, dst))
+            self.queued_discards.append(set())
+        self.queued_discards[delay-1].add(dst)
 
     def __discard(self, delay: int, reg: Register):
         if delay > 0:
             for c in CONDITION_REGISTERS[reg]:
-                self.__queue_discard(delay, c, c)
+                self.__queue_discard(delay, c)
         else:
             for c in CONDITION_REGISTERS[reg]:
                 self.current_moves[c].discard(c)
 
     def __discard_cond(self, delay: int, src: ConditionType, dst: Register):
-        if delay > 0:
-            for c in CONDITION_REGISTERS[dst]:
-                self.__queue_discard(delay, src, c)
-        else:
-            for c in CONDITION_REGISTERS[dst]:
-                self.current_moves[src].discard(c)
+        self.current_cond_discards.append((src, dst, delay))
 
     def __add_move(self, src: ConditionType, dst: ConditionType):
         if ConditionType(dst.value ^ 1) in self.current_moves[src]:
@@ -154,6 +151,8 @@ class ConditionState:
                 self.__join(r, unwrap(c.register))
         self.equivalences.append(self.lookup.copy())
         self.__init_moves()
+        self.cond_discards.append(self.current_cond_discards)
+        self.current_cond_discards = list()
 
     def __explore_conditions(self, start: set[ConditionType], delay: int, delta: int) -> set[ConditionType]:
         equivalent_conditions = set()
@@ -166,11 +165,25 @@ class ConditionState:
                 equivalent_conditions.update({CONDITION_REGISTERS[r][i] 
                         for r in registers})
         if delay == 0: return equivalent_conditions
+        queued_discards: list[set[Register]] = list()
         # -1 because moves in parallel to check belong to the same chain
-        for moves in self.moves[-delay-1: -delay-1+delta]:
+        for cycle in range(-delay-1, -delay-1+delta):
+            if len(self.moves) < abs(cycle): continue
+            moves = self.moves[cycle]
             next_equivalent = set()
             for c in equivalent_conditions:
                 next_equivalent.update(moves[c])
+            queued_discards.append(set())
+            for src, dst, delay in self.cond_discards[cycle]:
+                # only skip discards that cannot occur
+                if ConditionType(src.value ^ 1) in equivalent_conditions:
+                    continue
+                while len(queued_discards) <= delay:
+                    queued_discards.append(set())
+                queued_discards[delay].add(dst)
+            for dst in queued_discards.pop(0):
+                for c in CONDITION_REGISTERS[dst]:
+                    next_equivalent.discard(c)
             equivalent_conditions = next_equivalent
         return equivalent_conditions
 
