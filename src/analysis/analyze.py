@@ -275,6 +275,7 @@ def analyze_basic_blocks(arch, func: Function,
                             if (indirect_branch.source_addr != branch_src.addr):
                                 continue
                             block.add_pending_outgoing_edge(target_type, indirect_branch.dest_addr, arch)
+                            if target_type == BranchType.CallDestination: break
                             add_target_to_process(indirect_branch.dest_addr, carried_branches)
                         __specify_branch_type(function_context, block.start, target_type, unwrap(src), ends_block, specified_branches)
                     case BranchType.FalseBranch:
