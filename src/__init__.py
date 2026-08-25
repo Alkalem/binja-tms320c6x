@@ -16,6 +16,7 @@
 
 import binaryninja as _bn
 
+from . import log
 from .arch import TInyC6x, TMS320C6x
 from .platform import TInyC6xCall, C6xPlatform, C6xCall
 
@@ -25,6 +26,8 @@ def _init_plugin():
     TI_C6x_MACHINE = 140
     SYSV_OSABI = 0
     LINUX_OSABI = 3
+
+    log.init()
 
     TInyC6x.register()
     arch = _bn.architecture.Architecture['TInyC6x']
