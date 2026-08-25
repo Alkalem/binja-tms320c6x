@@ -16,10 +16,11 @@
 
 from binaryninja.architecture import Architecture, InstructionInfo, RegisterInfo, RegisterName, BasicBlockAnalysisContext, FunctionLifterContext, InstructionTextToken
 from binaryninja.function import Function
-from binaryninja.log import log_warn, log_error
 from binaryninja.lowlevelil import LowLevelILFunction
 
 from typing import Any, Optional
+import logging
+logger = logging.getLogger(__name__)
 
 from tms320c6x_disassembler.types import Register, ControlRegister, ISA
 from .analysis import analyze_basic_blocks
@@ -90,16 +91,16 @@ class TMS320C6xBaseArch(Architecture):
         # limit to max nop delay for IDLE
         delay = min(8, get_delay_consumption(instr) - 1)
         if instr.opcode.startswith('ld') and addr % 0x20 != 0x1c:
-            log_warn(f'NOPing load instruction is unaware of protected loads @{addr:08x}')
+            logger.warning(f'NOPing load instruction is unaware of protected loads', extra={'addr': addr})
         if len(data) == 2:
             if addr & 0x1f == 0x1e:
-                log_error(f'Failed to convert invalid instruction @{addr:08x} to NOP.')
+                logger.error(f'Failed to convert invalid instruction to NOP.', extra={'addr': addr})
                 return None
             delay = min(7, delay) # only 3 bits for compact NOP
             return bytes([0x6e, (delay << 5) | 0x0c])
         elif len(data) == 4:
             if addr & 0x2:
-                log_error(f'Failed to convert invalid instruction @{addr:08x} to NOP.')
+                logger.error(f'Failed to convert invalid instruction to NOP.', extra={'addr': addr})
                 return None
             # preserve headers
             if data[-1] & 0xf0 == 0xe0: return data

@@ -21,7 +21,6 @@ from binaryninja.basicblock import BasicBlock
 from binaryninja.commonil import ILSourceLocation
 from binaryninja.function import ArchAndAddr
 from binaryninja.lowlevelil import ILRegister, LowLevelILReg, LowLevelILFunction, ExpressionIndex, LLIL_REG_IS_TEMP, LLIL_TEMP, LLIL_GET_TEMP_REG_INDEX, LowLevelILLabel
-from binaryninja.log import log_warn, log_info, log_debug, log_error
 from binaryninja.variable import PossibleValueSet, ValueRange
 
 from collections import deque
@@ -29,6 +28,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Optional, Sequence, Iterable, Generator, List, TYPE_CHECKING
+import logging
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .arch import TMS320C6xBaseArch
@@ -823,7 +824,6 @@ def lift_function(arch: TMS320C6xBaseArch, function: LowLevelILFunction, context
     function_context: FunctionContext = context.function_arch_context
     ctx.aliases = function_context.aliases
 
-    logger = context._logger
     bv = unwrap(function.view)
 
     for block in context.blocks:
@@ -853,12 +853,12 @@ def lift_function(arch: TMS320C6xBaseArch, function: LowLevelILFunction, context
                 opcode = bv.read(addr, block.end - addr)
             if len(opcode) == 0:
                 function.append(function.undefined(loc=_addr2loc(addr)))
-                logger.log_debug(f'Instruction data not found at {addr:08x}')
+                logger.debug('Instruction data not found', extra={'addr': addr})
                 break
             if settings.header_based:
                 opcode_end = addr + len(opcode)
                 remaining_fp_bytes = (-opcode_end) % FP_SIZE
-                if remaining_fp_bytes: log_debug(f'Reading FP remainder at {opcode_end:08x}')
+                if remaining_fp_bytes: logger.debug(f'Reading FP remainder at {opcode_end:08x}')
                 opcode += bv.read(opcode_end, remaining_fp_bytes)
 
             if addr in function_context.branches:
@@ -871,7 +871,7 @@ def lift_function(arch: TMS320C6xBaseArch, function: LowLevelILFunction, context
 
             if lifted_bytes is None or lifted_bytes <= 0:
                 function.append(function.undefined(loc=_addr2loc(addr)))
-                logger.log_debug(f'Invalid instruction at {addr:08x}')
+                logger.debug('Invalid instruction', extra={'addr': addr})
                 break
             addr += lifted_bytes
 
@@ -881,7 +881,7 @@ def lift_function(arch: TMS320C6xBaseArch, function: LowLevelILFunction, context
 
         if begin_instruction_count == end_instruction_count:
             function.append(function.undefined(loc=_addr2loc(addr)))
-            logger.log_debug(f'Basic block must have instructions to be valid, at {block.start:08x}')
+            logger.debug('Basic block must have instructions to be valid', extra={'addr': block.start})
         elif ((len(block.outgoing_edges) == 0 and not block.can_exit and not block.fallthrough_to_function) or block.end == segment.end):
             #HACK: workaround to stop lifting 
             function.append(function.no_ret(loc=_addr2loc(block.end)))
@@ -895,7 +895,7 @@ def lift_function(arch: TMS320C6xBaseArch, function: LowLevelILFunction, context
     if len(function) == 0:
         # If no instructions, make it undefined
         function.append(function.undefined())
-        logger.log_debug(f'No instructions found at {unwrap(function.source_function).start:08x}')
+        logger.debug('No instructions found', extra={'addr': unwrap(function.source_function).start})
 
     function.finalize()
     return True
