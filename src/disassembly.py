@@ -267,11 +267,29 @@ def gen_tokens(instr: Instruction, parallel: bool, offset: int = 0):
             ' ' * (CONDITION_LENGTH -len(str(instr.condition))))
     )
 
-    tokens.append(
-        InstructionTextToken(
-            InstructionTextTokenType.CharacterConstantToken if instr.is_fp_header() else InstructionTextTokenType.InstructionToken, 
-            instr.opcode)
-    )
+    if instr.is_fp_header():
+        if Settings().get_bool('tms320c6x.showFPHeaderDetails'):
+            h = unwrap(instr.header)
+            prot = 'PROT, ' if h.protected_loads else ''
+            rs = '16-23' if h.high_register_set else '0-7'
+            sz_prim = 'DW' if h.data_size & 4 else 'W'
+            sz_sec = ('BU', 'B', 'HU', 'H', 'W', 'B', 'NW', 'H')[h.data_size]
+            br = ', BR' if h.branching else ''
+            sat = ', SAT' if h.saturating else ''
+            fp_text = f'<FP: {prot}RS={rs}, DSZ=({sz_prim}, {sz_sec}){br}{sat}>'
+        else:
+            fp_text = instr.opcode
+        tokens.append(
+            InstructionTextToken(
+                InstructionTextTokenType.CharacterConstantToken,
+                fp_text)
+        )
+    else:
+        tokens.append(
+            InstructionTextToken(
+                InstructionTextTokenType.InstructionToken, 
+                instr.opcode)
+        )
     middle_length = len(instr.opcode)
     tokens.append(
         InstructionTextToken(

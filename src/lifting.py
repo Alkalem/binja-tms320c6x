@@ -34,10 +34,9 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from .arch import TMS320C6xBaseArch
     from .analysis import FunctionContext, BranchContext
-from .constants import ARCH_SIZE, HW_SIZE, DW_SIZE, INSTRUCTION_DELAY, FP_SIZE
-from .instruction import Disassembler
+from .constants import ARCH_SIZE, HW_SIZE, DW_SIZE, FP_SIZE
 from .util import get_delay_consumption, is_branch, unwrap, Wrapper
-from tms320c6x_disassembler.types import Instruction, Operand, ImmediateOperand, RegisterOperand, MemoryOperand, Register, AddressingMode, RW, FuncUnitsOperand, ControlRegisterOperand, RegisterPairOperand, ControlRegister, ConditionType
+from tms320c6x_disassembler.types import Instruction, Operand, ImmediateOperand, RegisterOperand, MemoryOperand, Register, AddressingMode, RW, FuncUnitsOperand, ControlRegisterOperand, RegisterPairOperand, ConditionType
 
 
 ## Temporary IL registers

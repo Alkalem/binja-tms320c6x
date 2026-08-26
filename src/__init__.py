@@ -19,6 +19,7 @@ import binaryninja as _bn
 from . import log
 from .arch import TInyC6x, TMS320C6x
 from .platform import TInyC6xCall, C6xPlatform, C6xCall
+from .settings import register_settings
 
 
 def _init_plugin():
@@ -27,6 +28,7 @@ def _init_plugin():
     SYSV_OSABI = 0
     LINUX_OSABI = 3
 
+    register_settings()
     log.init()
 
     TInyC6x.register()

@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 from tms320c6x_disassembler.types import Register, ControlRegister, ISA
 from .analysis import analyze_basic_blocks
-from .instruction import Disassembler, gen_tokens, gen_parallel_fallthrough
+from .disassembly import Disassembler, gen_tokens, gen_parallel_fallthrough
 from .constants import *
 from .lifting import lift_instructions, lift_function
 from .util import get_delay_consumption, is_branch
