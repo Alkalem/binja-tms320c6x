@@ -14,13 +14,14 @@
 # You should have received a copy of the GNU General Public License along with
 # this program. If not, see <http://www.gnu.org/licenses/>.
 
-from binaryninja import BasicBlock, DisassemblyTextLine
+from binaryninja import BasicBlock, DisassemblyTextLine, LinearViewObject
 from binaryninja.architecture import InstructionTextToken, InstructionInfo
 from binaryninja.enums import InstructionTextTokenType, BranchType
-from binaryninja.renderlayer import RenderLayer
+from binaryninja.lineardisassembly import LinearDisassemblyLine
+from binaryninja.renderlayer import LinearDisassemblyLine, RenderLayer
 from binaryninja.settings import Settings
 
-from typing import Generator, Optional
+from typing import Any, Generator, List, Optional
 from dataclasses import dataclass
 
 from .constants import ARCH_SIZE, BRANCH_DELAY
@@ -354,6 +355,9 @@ class FPHeaderRenderLayer(RenderLayer):
 
     def apply_to_disassembly_block(self, block: BasicBlock, lines: list[DisassemblyTextLine]) -> list[DisassemblyTextLine]:
         if len(lines) == 0: return lines
+        if not (unwrap(block.view).view.startswith('Graph')
+                or block.end-1 == unwrap(block.function).highest_address):
+            return lines
         if Settings().get_bool('tms320c6x.showFPHeaderDetails'):
             ends_on_fp_boundary = (block.end % 32) == 0
             if ends_on_fp_boundary: return lines
@@ -379,3 +383,6 @@ class FPHeaderRenderLayer(RenderLayer):
                     address=header_addr)
             )
         return super().apply_to_disassembly_block(block, lines)
+
+    def apply_to_linear_view_object(self, obj: LinearViewObject, prev: LinearViewObject | None, next: LinearViewObject | None, lines: List[Any]) -> List[Any]:
+        return super().apply_to_linear_view_object(obj, prev, next, lines)
