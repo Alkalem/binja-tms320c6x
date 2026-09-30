@@ -21,11 +21,13 @@ from binaryninja.enums import BranchType, FunctionAnalysisSkipOverride
 from binaryninja.function import ArchAndAddr, Function
 
 from dataclasses import dataclass
-from typing import NamedTuple, Optional, Sequence
+from typing import NamedTuple, Optional, Sequence, TYPE_CHECKING
 import logging
 logger = logging.getLogger(__name__)
 
 from tms320c6x_disassembler.types import ConditionType, Instruction, RegisterOperand, Register, RW
+if TYPE_CHECKING:
+    from ..arch import TMS320C6xBaseArch
 from .condition import ConditionState
 from ..constants import ARCH_SIZE, FP_SIZE, HW_SIZE, BRANCH_DELAY
 from ..lifting import ILBranchType
@@ -72,7 +74,8 @@ class BranchContext:
     src: Instruction
 
 class FunctionContext:
-    def __init__(self) -> None:
+    def __init__(self, arch: TMS320C6xBaseArch) -> None:
+        self.arch: TMS320C6xBaseArch = arch
         self.headers: dict[int, bytes] = dict()
         self.sploop_ii: dict[int, int] = dict()
         self.branches: dict[int, list[BranchContext]] = dict()
@@ -93,7 +96,7 @@ class AnalyzedBranch(NamedTuple):
 UnifiedSlot = Sequence[AnalyzedBranch]
 PendingBranches = list[BranchSlot]
 
-def analyze_basic_blocks(arch, func: Function, 
+def analyze_basic_blocks(arch: TMS320C6xBaseArch, func: Function, 
         context: BasicBlockAnalysisContext) -> None:
     #TODO: sound error handling
     view = func.view
@@ -108,7 +111,7 @@ def analyze_basic_blocks(arch, func: Function,
     blocks_to_process.append(ArchAndAddr(arch, start))
     seen_blocks.add(ArchAndAddr(arch, start))
 
-    function_context: FunctionContext = FunctionContext()
+    function_context: FunctionContext = FunctionContext(arch)
     specified_branches: dict[int, list[BranchContext]] = dict()
     context.function_arch_context = function_context
 
