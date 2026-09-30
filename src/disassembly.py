@@ -14,18 +14,22 @@
 # You should have received a copy of the GNU General Public License along with
 # this program. If not, see <http://www.gnu.org/licenses/>.
 
+from binaryninja import BasicBlock, DisassemblyTextLine
 from binaryninja.architecture import InstructionTextToken, InstructionInfo
 from binaryninja.enums import InstructionTextTokenType, BranchType
+from binaryninja.renderlayer import RenderLayer
+from binaryninja.settings import Settings
 
 from typing import Generator, Optional
 from dataclasses import dataclass
 
 from .constants import ARCH_SIZE, BRANCH_DELAY
+from .util import unwrap
 from tms320c6x_disassembler import Disassembler as C6xDisassembler
 from tms320c6x_disassembler.types import Operand, Instruction, Register, \
         ImmediateOperand, RegisterOperand, ControlRegisterOperand, \
         RegisterPairOperand, MemoryOperand, FuncUnitsOperand, ISA, \
-        ControlRegister
+        ControlRegister, Header
 
 @dataclass(frozen=True)
 class _BranchInfo:
@@ -226,6 +230,19 @@ def _gen_operand_tokens(operand: Operand):
         case _:
             raise NotImplementedError(f'operand type {type(operand)}')
 
+def _gen_fp_header_tokens(h: Header):
+    prot = 'PROT, ' if h.protected_loads else ''
+    rs = '16-23' if h.high_register_set else '0-7'
+    sz_prim = 'DW' if h.data_size & 4 else 'W'
+    sz_sec = ('BU', 'B', 'HU', 'H', 'W', 'B', 'NW', 'H')[h.data_size]
+    br = ', BR' if h.branching else ''
+    sat = ', SAT' if h.saturating else ''
+    fp_text = f'<FP: {prot}RS={rs}, DSZ=({sz_prim}, {sz_sec}){br}{sat}>'
+    return [InstructionTextToken(
+            InstructionTextTokenType.CharacterConstantToken,
+            fp_text)]
+
+
 CONDITION_LENGTH = 6
 OPCODE_INDENTATION = 12
 
@@ -270,20 +287,14 @@ def gen_tokens(instr: Instruction, parallel: bool, offset: int = 0):
     if instr.is_fp_header():
         if Settings().get_bool('tms320c6x.showFPHeaderDetails'):
             h = unwrap(instr.header)
-            prot = 'PROT, ' if h.protected_loads else ''
-            rs = '16-23' if h.high_register_set else '0-7'
-            sz_prim = 'DW' if h.data_size & 4 else 'W'
-            sz_sec = ('BU', 'B', 'HU', 'H', 'W', 'B', 'NW', 'H')[h.data_size]
-            br = ', BR' if h.branching else ''
-            sat = ', SAT' if h.saturating else ''
-            fp_text = f'<FP: {prot}RS={rs}, DSZ=({sz_prim}, {sz_sec}){br}{sat}>'
+            tokens.extend(_gen_fp_header_tokens(h))
         else:
             fp_text = instr.opcode
-        tokens.append(
-            InstructionTextToken(
-                InstructionTextTokenType.CharacterConstantToken,
-                fp_text)
-        )
+            tokens.append(
+                InstructionTextToken(
+                    InstructionTextTokenType.CharacterConstantToken,
+                    fp_text)
+            )
     else:
         tokens.append(
             InstructionTextToken(
@@ -336,3 +347,35 @@ def gen_parallel_fallthrough(offset: int) -> list[InstructionTextToken]:
                 InstructionTextTokenType.NewLineToken, '', 
                 offset)
     ]
+
+
+class FPHeaderRenderLayer(RenderLayer):
+    name = 'Render FP Headers'
+
+    def apply_to_disassembly_block(self, block: BasicBlock, lines: list[DisassemblyTextLine]) -> list[DisassemblyTextLine]:
+        if len(lines) == 0: return lines
+        if Settings().get_bool('tms320c6x.showFPHeaderDetails'):
+            ends_on_fp_boundary = (block.end % 32) == 0
+            if ends_on_fp_boundary: return lines
+            function = unwrap(block.function)
+            arch = function.arch
+            if function.start not in arch.function_arch_contexts:
+                return lines
+
+            context = arch.function_arch_contexts[function.start]
+            last_fp_addr = block.end - (block.end % 32)
+            header_bytes = context.headers.get(last_fp_addr)
+            if header_bytes is None: return lines
+
+            header_addr = last_fp_addr + 0x1c
+            header_instr = context.arch.disasm.decode(header_bytes, header_addr)
+            lines.append(
+                DisassemblyTextLine(
+                    [
+                        InstructionTextToken(
+                            InstructionTextTokenType.TextToken, 
+                            "Active header: ")
+                    ] + _gen_fp_header_tokens(header_instr.header), 
+                    address=header_addr)
+            )
+        return super().apply_to_disassembly_block(block, lines)

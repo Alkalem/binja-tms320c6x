@@ -18,6 +18,7 @@ import binaryninja as _bn
 
 from . import log
 from .arch import TInyC6x, TMS320C6x
+from .disassembly import FPHeaderRenderLayer
 from .platform import TInyC6xCall, C6xPlatform, C6xCall
 from .settings import register_settings
 
@@ -30,6 +31,8 @@ def _init_plugin():
 
     register_settings()
     log.init()
+
+    FPHeaderRenderLayer.register()
 
     TInyC6x.register()
     arch = _bn.architecture.Architecture['TInyC6x']
