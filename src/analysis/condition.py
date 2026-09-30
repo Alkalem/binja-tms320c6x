@@ -16,8 +16,10 @@
 
 from tms320c6x_disassembler.types import ConditionType, Instruction, RW, RegisterOperand, RegisterPairOperand, Register, ImmediateOperand
 
-from ..util import op_get_high_register, op_get_register, op_get_value, unwrap
+import logging
+logger = logging.getLogger(__name__)
 
+from ..util import op_get_high_register, op_get_register, op_get_value, unwrap
 
 CONDITION_REGISTERS = {
     Register.A0: (ConditionType.A0, ConditionType.NOT_A0),
@@ -37,6 +39,9 @@ class ConditionState:
         self.equivalences = [self.lookup.copy() for _ in range(6)]
         self.__init_moves()
         self.current_cond_discards: list[tuple[ConditionType, Register, int]] = list()
+        self.return_writes: dict[ConditionType, int] = {
+            c: -6 for c in ConditionType
+        }
 
     def __split(self, a: Register):
         if not (a in CONDITION_REGISTERS):
@@ -93,6 +98,15 @@ class ConditionState:
         self.__discard(0, dst)
 
     def process(self, i: Instruction):
+        # 1. Record write access to return register
+        if (i.opcode in ('addkpc', 'callp')
+            or any((RW.write in op.access_info.rw 
+                and isinstance(op, RegisterOperand)
+                and op.register == Register.B3
+                for op in i.operands))):
+            self.return_writes[i.condition] = len(self.moves)
+
+        # 2. Detection of condition writes and moves
         if i.condition == ConditionType.UNCONDITIONAL and is_cond_move(i):
             match i.operands[-2]:
                 case RegisterOperand(src) | RegisterPairOperand(src, _):
@@ -194,6 +208,14 @@ class ConditionState:
     def is_impossible(self, src: ConditionType, delay: int, dst: ConditionType, delta: int) -> bool:
         equivalent_conditions = self.__explore_conditions({src}, delay, delta)
         return ConditionType(dst.value ^ 1) in equivalent_conditions
+
+    def is_likely_return(self, active: ConditionType, delay: int) -> bool:
+        equivalent_conditions = self.__explore_conditions({active},
+                delay, delay)
+        latest_return_write = max([self.return_writes[c]
+                for c in ConditionType if c in equivalent_conditions],
+                default=-6)
+        return (len(self.moves)-1 - latest_return_write) <= delay
 
 ### Condition util ###
 

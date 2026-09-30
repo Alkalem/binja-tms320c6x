@@ -60,11 +60,14 @@ class BlockState:
         self.conditions: ConditionState = ConditionState()
 
     def process(self, ep: list[Instruction], raw: bytes):
+        delay_consumption = 0
         for i in ep:
             self.sploop.process(i)
             self.conditions.process(i)
+            delay_consumption = max(get_delay_consumption(i), delay_consumption)
         self.packet += 1
         self.ep_lengths.append(len(raw))
+        return delay_consumption
         
 @dataclass
 class BranchContext:
@@ -143,7 +146,6 @@ def analyze_basic_blocks(arch: TMS320C6xBaseArch, func: Function,
         if location in block_carried_branches:
             pending_branches = block_carried_branches[location]
             __add_branches_to_context(function_context, location.addr, pending_branches)
-        last_return_write = 255
         if location in sploop_blocks:
             s.sploop = sploop_blocks[location]
 
@@ -230,7 +232,7 @@ def analyze_basic_blocks(arch: TMS320C6xBaseArch, func: Function,
                     (location.addr + ARCH_SIZE) % FP_SIZE == 0)
                 if (not(is_parallel or header_next) or ends_block): break
             block.add_instruction_data(ep_bytes)
-            s.process(ep, ep_bytes)
+            delay_consumption = s.process(ep, ep_bytes)
             if len(new_branches):
                 for delay, instr, branch in new_branches:
                     while len(pending_branches) <= delay:
@@ -338,19 +340,8 @@ def analyze_basic_blocks(arch: TMS320C6xBaseArch, func: Function,
                             function_context.aliases[src_b.address] = src_a.address
 
 
-            # Determine delay of execution packet and consume delay slots
-            delay_consumption = 0
+            # Consume delay slots of execution packet
             location = ArchAndAddr(arch, ep_location.addr + len(ep_bytes))
-            _header_suffix = view.read(location.addr, FP_SIZE - (location.addr % FP_SIZE))
-            for instr in arch.disasm.disasm(ep_bytes+_header_suffix, ep_location.addr):
-                delay_consumption = max(get_delay_consumption(instr), delay_consumption)
-                if (instr.opcode in ('addkpc', 'callp')
-                        or any((RW.write in op.access_info.rw 
-                            and isinstance(op, RegisterOperand)
-                            and op.register == Register.B3
-                            for op in instr.operands))):
-                    last_return_write = 0
-                if not (instr.parallel or instr.is_fp_header()): break
             for _ in range(delay_consumption):
                 s.conditions.end_ep()
                 if len(pending_branches):
@@ -359,8 +350,8 @@ def analyze_basic_blocks(arch: TMS320C6xBaseArch, func: Function,
                     branch_slot = __unify_branches(branch_slot)
                     for active_branch in branch_slot:
                         carried_branches = __get_carried_branches(active_branch, pending_branches, s.conditions)
-                        handle_branch(active_branch, last_return_write <= BRANCH_DELAY,  carried_branches)
-            last_return_write += delay_consumption
+                        returns = s.conditions.is_likely_return(active_branch.condition, active_branch.delay)
+                        handle_branch(active_branch, returns, carried_branches)
             
             location = ArchAndAddr(arch, ep_location.addr + len(ep_bytes))
 
