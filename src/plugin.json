@@ -15,7 +15,7 @@
 		"Windows" : "pip install -r requirements.txt"
 	},
 	"dependencies": {"pip": ["tms320c6x_disassembler"]},
-	"version": "0.3",
+	"version": "0.4",
 	"author": "Benedikt Waibel",
 	"minimumbinaryninjaversion": 7486
 }

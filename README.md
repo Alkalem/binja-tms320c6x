@@ -6,17 +6,17 @@ Disassembly is complete, for other features see the detailed limitations below. 
 ## Installation
 
 Simply clone this project into your binja plugin folder. Alternatively, download and extract it to this location.
-This plugin requires the C6x disassembler included as submodule to work.
+This plugin requires the specified C6x disassembler to work.
 
 ## Features / Limitations
 
 Look up the docs of this plugin for a detailed list of features and plans.
 
 - Disassembly, including parallel instructions, is complete. Disassembly of header-based fetch packets is based on analysis context.
-- Block analysis uses a custom recursive descent algorithm. Call detection and return detection are based on heuristics. Shifting condition registers and reloading SPLOOPs are known to produce incorrect control flow right now.
+- Block analysis uses a custom recursive descent algorithm. Call detection and return detection are based on heuristics. Condition tracking supports common cases of shifting condition registers. Reloading SPLOOPs are known to produce incorrect control flow right now. Indirect branch targets might remain undetected.
 - Lifting supports a small subset of instructions. Instruction delay is handled with temporary registers. Function-based lifting serializes parallel and delayed execution. Conditional execution is supported. Currently, branches are the only delayed instructions that are delayed across basic blocks. Conflicts that other delayed results could cause are ignored.
 - Multiple architecture features entirely lack lifting. This is the case for SPLOOPs, control registers, 40-bit and long calculations to name a few.
-- A default calling convention is provided both for the official compiler and the TMS320C67x tiny C variant.
+- A default calling convention is provided both for the official compiler and the TMS320C67x tiny C variant (see valgrind/perf).
 - This plugin supports features up to the TMS320C674x architecture, but lifting only supports a small subset of instructions. Extended support is in development.
 
 If a feature you expected is missing or not working as you expected, feel free to open an issue. Please include a minimal sample with bug reports to aid reproduction.

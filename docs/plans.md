@@ -2,8 +2,6 @@
 
 Disassembly:
 - Test cases for info, disassembly and lifting inputs
-- Showing full disassembly for header-based FPs
-- Disassembling SPKERNEL(R) correctly without SPLOOP(R) in same block
 
 Analysis:
 - Function creation (registering call targets, skipping non-function blocks)
@@ -11,6 +9,7 @@ Analysis:
 - Nested SPLOOP epilog block
 - Fully supporting delayed conditional branches and calls
 - Delay checks of split blocks and checks for short loops (prolog)
+- Indirect call targets (added during lifting)
 
 Lifting:
 - Top-level lifting architecture for parallel instructions and branch delay
@@ -26,5 +25,4 @@ Lifting:
 - Reordering of instructions to minimize the use of temporary registers and simplify later analysis steps.
 
 Assembly:
-- Simple assembly bit flipping (completely changing to arbitrary instructions will require working assembler)
-- Changing registers (sometimes requires different format)
+- Changing registers (sometimes requires different format, requiring a working assembler)

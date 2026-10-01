@@ -9,7 +9,7 @@ Inputs:
 - view: global binary information, reading raw bytes
 
 Outputs (via context):
-- basic blocks: created and added using context, contain instruction bytes and outgoing edges
+- basic blocks: created and added using context, contain outgoing edges and additional block information
 - function_arch_context: headers at block boundaries; SPLOOP ii, pending branches and their equivalence groups
 
 The architecture is assumed to be fixed for each binary. Its use during analysis is mostly to annotate this fact in the result. Apart from this, it provides disassembly, instruction info and maximum instruction size.
@@ -22,9 +22,9 @@ Instruction info provides a basic categorization of branch types for an instruct
 
 The condition type is therefore used with two different meanings: branch type and edge type. 
 The branch type is used for functional categories like direct, indirect or return. The condition type of the instruction carries condition information.
-An edge type is also a branch type, but may differ from the branch type. Binary Ninja uses the branch type provided for outgoing edges not only for further analysis. True and False branches result in green and red coloring of the outgoing edges. Because Calls and returns are not shown as edges, they should not show as conditional edge even if they are in fact conditional.
+An edge type is also a branch type, but may differ from the branch type. Binary Ninja uses the branch type provided for outgoing edges not only for further analysis. For example, True and False branches result in green and red coloring of the outgoing edges. Because Calls and returns are not shown as edges, they should not show as conditional edge even if they are in fact conditional.
 
-Analysis of fitting edge types is performed during unification of a branch slot. Here, all branches triggering in the same cycle are known. This is used to assign True or False case to conditional branches, and to create fallthrough FalseBranch edges.
+Analysis of fitting edge types is performed during unification of a branch slot. Here, all branches triggering in the same cycle are known. This is used to assign True or False cases to conditional branches, and to create fallthrough FalseBranch edges.
 
 Types used in instruction info (can all be conditional):
 - Unconditional: direct branches (actually conditional as well)
@@ -50,3 +50,5 @@ To eliminate impossible branches and detect conditional branches unconditionally
 Tracking of condition values is limited, however. It is built for common compiler patterns and ignores other registers. This plugin does not aim to implement full value set analysis, not even for conditions. Condition analysis may not be complete, but it simplifies graphs for common cases without simplifying too much for complex cases.
 
 In addition to tracking writes in a forward direction, condition registers that carry the same value are noted. This is required for writes that occur before the first jump in a chain. Its detection is more limited, but sufficient for a common observed compiler pattern.
+
+The return heuristic detects if the return register is overwritten in the delay slots of a branch. This signals a function call with the new return value. In practice, this feature is integrated into condition tracking. It is used to determine if a conditional return write applies to a branch.
