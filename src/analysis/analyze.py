@@ -14,6 +14,8 @@
 # You should have received a copy of the GNU General Public License along with
 # this program. If not, see <http://www.gnu.org/licenses/>.
 
+from __future__ import annotations
+
 from binaryninja.architecture import BasicBlockAnalysisContext, InstructionBranch
 from binaryninja.basicblock import BasicBlock
 from binaryninja.binaryview import BinaryView
@@ -162,8 +164,6 @@ def analyze_basic_blocks(arch: TMS320C6xBaseArch, func: Function,
                 else:
                     split_block = context.create_basic_block(location.arch, location.addr)
                     assert split_block is not None
-                    instr_data = target_block.get_instruction_data(location.addr)
-                    split_block.add_instruction_data(instr_data)
                     split_block.fallthrough_to_function = target_block.fallthrough_to_function
                     split_block.has_undetermined_outgoing_edges = target_block.has_undetermined_outgoing_edges
                     split_block.can_exit = target_block.can_exit
@@ -231,7 +231,6 @@ def analyze_basic_blocks(arch: TMS320C6xBaseArch, func: Function,
                 header_next = (instr.header is not None and 
                     (location.addr + ARCH_SIZE) % FP_SIZE == 0)
                 if (not(is_parallel or header_next) or ends_block): break
-            block.add_instruction_data(ep_bytes)
             delay_consumption = s.process(ep, ep_bytes)
             if len(new_branches):
                 for delay, instr, branch in new_branches:

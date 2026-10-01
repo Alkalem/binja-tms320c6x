@@ -847,9 +847,7 @@ def lift_function(arch: TMS320C6xBaseArch, function: LowLevelILFunction, context
             function.set_current_address(addr, arch)
             function.clear_indirect_branches()
 
-            opcode = block.get_instruction_data(addr)
-            if len(opcode) == 0:
-                opcode = bv.read(addr, block.end - addr)
+            opcode = bv.read(addr, block.end - addr)
             if len(opcode) == 0:
                 function.append(function.undefined(loc=_addr2loc(addr)))
                 logger.debug('Instruction data not found', extra={'addr': addr})
@@ -857,7 +855,6 @@ def lift_function(arch: TMS320C6xBaseArch, function: LowLevelILFunction, context
             if settings.header_based:
                 opcode_end = addr + len(opcode)
                 remaining_fp_bytes = (-opcode_end) % FP_SIZE
-                if remaining_fp_bytes: logger.debug(f'Reading FP remainder at {opcode_end:08x}')
                 opcode += bv.read(opcode_end, remaining_fp_bytes)
 
             if addr in function_context.branches:
